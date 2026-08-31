@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from typing import Dict, List
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -107,14 +108,15 @@ def break_even_default_rate(
 
 
 def expected_pd_by_loan_amount(
-    loan_amount: float,
+    loan_amount: float | np.ndarray,
     reference_pd: float,
-    reference_loan_amount: float,
-    risk_sensitivity: float,
-) -> float:
-    reference_odds = reference_pd / (1 - reference_pd)
-    adjusted_odds = reference_odds * (1 + risk_sensitivity) ** ((loan_amount - reference_loan_amount) / 100)
-    return adjusted_odds / (1 + adjusted_odds)
+    mid_pd: float,
+    high_pd: float,
+) -> float | np.ndarray:
+    """Linearly interpolate the three visible synthetic risk-belief anchors."""
+    anchors = np.array([200.0, 500.0, 1000.0])
+    beliefs = np.array([reference_pd, mid_pd, high_pd])
+    return np.interp(loan_amount, anchors, beliefs)
 
 
 def audit_inputs(rows: List[Dict[str, str]]) -> None:
@@ -127,14 +129,14 @@ PRIOR_STRENGTH = float(st.session_state.get("model_prior_strength", 20.0))
 PRIOR_ALPHA = PRIOR_EXPECTED_PD * PRIOR_STRENGTH
 PRIOR_BETA = (1 - PRIOR_EXPECTED_PD) * PRIOR_STRENGTH
 RECOMMENDED_LOAN = 200.0
-RECOMMENDED_TERM = 1
+RECOMMENDED_TERM = max(1, int(st.session_state.get("constraint_min_repayment_term", 1)))
 RECOMMENDED_FEE_RATE = 0.20
 LGD = float(st.session_state.get("model_lgd", 0.70))
 FUNDING_COST = float(st.session_state.get("model_funding_cost", 15.0))
 OPERATING_COST = float(st.session_state.get("model_operating_cost", 10.0))
 COLLECTION_COST_PER_DEFAULT = float(st.session_state.get("model_collection_cost", 5.0))
-REFERENCE_LOAN_AMOUNT = float(st.session_state.get("model_reference_loan_amount", 200.0))
-LOAN_AMOUNT_RISK_SENSITIVITY = float(st.session_state.get("model_loan_amount_risk_sensitivity", 0.05))
+MID_TICKET_PD = float(st.session_state.get("model_mid_ticket_pd", 0.12))
+HIGH_TICKET_PD = float(st.session_state.get("model_high_ticket_pd", 0.18))
 INITIAL_COHORT = 10
 
 
@@ -486,16 +488,20 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         )
         st.caption("Term is constrained and recorded here. The current MVP does not yet vary economics or risk by repayment term.")
 
-        curve_minimum = min(REFERENCE_LOAN_AMOUNT, max_loan_amount)
-        curve_maximum = max(max_loan_amount, curve_minimum)
+        risk_beliefs_valid = 0 < PRIOR_EXPECTED_PD < 1 and 0 < MID_TICKET_PD < 1 and 0 < HIGH_TICKET_PD < 1 and PRIOR_EXPECTED_PD <= MID_TICKET_PD <= HIGH_TICKET_PD
+        if not risk_beliefs_valid:
+            st.warning("The current risk-belief inputs imply that default risk decreases as loan amount increases. Adjust the assumptions to use PD values between 0 and 1 in non-decreasing order.")
+
+        curve_minimum = 200.0
+        curve_maximum = max_loan_amount
         curve_amounts = np.linspace(curve_minimum, curve_maximum, 100)
         curve_rows = []
         for amount in curve_amounts:
             pd_at_amount = expected_pd_by_loan_amount(
                 amount,
                 PRIOR_EXPECTED_PD,
-                REFERENCE_LOAN_AMOUNT,
-                LOAN_AMOUNT_RISK_SENSITIVITY,
+                MID_TICKET_PD,
+                HIGH_TICKET_PD,
             )
             expected_ue_at_amount = expected_unit_economics_per_loan(
                 amount,
@@ -517,6 +523,10 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
                 violated_constraints.append("Credit-loss budget")
             if INITIAL_COHORT > max_pilot_capacity:
                 violated_constraints.append("Pilot capacity")
+            if pd_at_amount > max_default_rate / 100:
+                violated_constraints.append("Maximum acceptable default rate")
+            if not min_pricing <= RECOMMENDED_FEE_RATE * 100 <= max_pricing:
+                violated_constraints.append("Pricing range")
             if not min_repayment_term <= evaluation_term <= max_repayment_term:
                 violated_constraints.append("Repayment term")
             curve_rows.append({
@@ -534,33 +544,37 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         recommended_pd = expected_pd_by_loan_amount(
             RECOMMENDED_LOAN,
             PRIOR_EXPECTED_PD,
-            REFERENCE_LOAN_AMOUNT,
-            LOAN_AMOUNT_RISK_SENSITIVITY,
+            MID_TICKET_PD,
+            HIGH_TICKET_PD,
         )
 
+        is_interior_optimum = constrained_optimum["Loan Amount"] not in {curve_minimum, curve_maximum}
         summary_c1, summary_c2, summary_c3, summary_c4 = st.columns(4)
         summary_c1.metric("Recommended start", money(RECOMMENDED_LOAN))
-        summary_c2.metric("Estimated economic optimum", money(constrained_optimum["Loan Amount"]))
+        summary_c2.metric("Estimated economic optimum" if is_interior_optimum else "Highest-value policy evaluated", money(constrained_optimum["Loan Amount"]))
         summary_c3.metric("Expected PD at optimum", pct(constrained_optimum["Expected PD"]))
         if round(constrained_optimum["Loan Amount"]) != RECOMMENDED_LOAN:
             summary_c4.metric("Why the gap?", "Limited local repayment evidence")
 
-        chart_df = curve_df.set_index("Loan Amount")[["Expected Unit Economics"]].rename(
-            columns={"Expected Unit Economics": "Expected UE / customer"}
+        curve_chart = alt.Chart(curve_df).mark_line(color="#20745d", strokeWidth=3).encode(
+            x=alt.X("Loan Amount:Q", title="Loan Amount ($)", scale=alt.Scale(domain=[curve_minimum, curve_maximum]), axis=alt.Axis(format="$,.0f")),
+            y=alt.Y("Expected Unit Economics:Q", title="Expected Unit Economics / Customer ($)", axis=alt.Axis(format="$,.0f")),
+            tooltip=[alt.Tooltip("Loan Amount:Q", format="$,.2f"), alt.Tooltip("Expected PD:Q", format=".1%"), alt.Tooltip("Expected Unit Economics:Q", format="$,.2f"), "Feasible:N", "Constraint violated:N"],
         )
-        chart_df["Zero-profit line"] = 0.0
-        chart_df["Recommended start"] = np.where(
-            np.isclose(chart_df.index.to_numpy(), RECOMMENDED_LOAN, atol=(curve_maximum - curve_minimum) / 99),
-            expected_unit_economics_per_loan(RECOMMENDED_LOAN, RECOMMENDED_FEE_RATE, recommended_pd, LGD, FUNDING_COST, OPERATING_COST, COLLECTION_COST_PER_DEFAULT),
-            np.nan,
-        )
-        chart_df["Estimated economic optimum"] = np.where(
-            np.isclose(chart_df.index.to_numpy(), constrained_optimum["Loan Amount"], atol=(curve_maximum - curve_minimum) / 99),
-            constrained_optimum["Expected Unit Economics"],
-            np.nan,
-        )
-        st.line_chart(chart_df, use_container_width=True)
-        st.caption(f"Recommended start: {money(RECOMMENDED_LOAN)}. Estimated economic optimum under current assumptions: {money(constrained_optimum['Loan Amount'])}. Business limit: {money(max_loan_amount)}. The optimum is an estimate, not a known true optimum.")
+        zero_rule = alt.Chart(pd.DataFrame({"value": [0]})).mark_rule(color="#8b938d", strokeDash=[4, 4]).encode(y="value:Q")
+        markers = pd.DataFrame([
+            {"Loan Amount": RECOMMENDED_LOAN, "Expected Unit Economics": expected_unit_economics_per_loan(RECOMMENDED_LOAN, RECOMMENDED_FEE_RATE, recommended_pd, LGD, FUNDING_COST, OPERATING_COST, COLLECTION_COST_PER_DEFAULT), "Label": "Recommended start"},
+            {"Loan Amount": constrained_optimum["Loan Amount"], "Expected Unit Economics": constrained_optimum["Expected Unit Economics"], "Label": "Estimated optimum" if is_interior_optimum else "Highest value evaluated"},
+        ])
+        marker_chart = alt.Chart(markers).mark_point(filled=True, size=100, color="#c54c2e").encode(x="Loan Amount:Q", y="Expected Unit Economics:Q", tooltip=["Label:N", alt.Tooltip("Loan Amount:Q", format="$,.2f"), alt.Tooltip("Expected Unit Economics:Q", format="$,.2f")])
+        st.altair_chart((curve_chart + zero_rule + marker_chart).properties(height=380), use_container_width=True)
+        st.caption("Break-even economics = $0. Markers identify the conservative recommended start and the calculated high-value policy.")
+        if is_interior_optimum:
+            st.caption(f"Under the current risk beliefs, expected economics improve up to approximately {money(constrained_optimum['Loan Amount'])} and deteriorate beyond that point as incremental credit loss exceeds incremental economic value.")
+        elif constrained_optimum["Loan Amount"] == curve_maximum:
+            st.caption("Under the current risk beliefs, expected economics continue improving through the evaluated range; no interior economic optimum is identified.")
+        else:
+            st.caption("Under the current risk beliefs, increasing ticket size reduces expected economic value across the evaluated range.")
         if unconstrained_optimum["Loan Amount"] > max_loan_amount:
             st.caption(f"Unconstrained estimated optimum: {money(unconstrained_optimum['Loan Amount'])}. Business-constrained estimated optimum: {money(constrained_optimum['Loan Amount'])}.")
 
@@ -575,9 +589,9 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             ])
             st.write("**RISK**")
             audit_inputs([
-                {"Parameter": "Expected PD at reference loan amount", "Value": pct(PRIOR_EXPECTED_PD), "Source": "Synthetic comparable-market assumption"},
-                {"Parameter": "Reference loan amount", "Value": money(REFERENCE_LOAN_AMOUNT), "Source": "Synthetic assumption"},
-                {"Parameter": "Loan amount risk sensitivity", "Value": pct(LOAN_AMOUNT_RISK_SENSITIVITY), "Source": "Synthetic assumption"},
+                {"Parameter": "Expected PD at $200", "Value": pct(PRIOR_EXPECTED_PD), "Source": "Synthetic comparable-market assumption"},
+                {"Parameter": "Expected PD at $500", "Value": pct(MID_TICKET_PD), "Source": "Synthetic risk belief"},
+                {"Parameter": "Expected PD at $1,000", "Value": pct(HIGH_TICKET_PD), "Source": "Synthetic risk belief"},
             ])
             st.write("**BUSINESS**")
             audit_inputs([
@@ -588,10 +602,10 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
                 {"Parameter": "Minimum / maximum repayment term", "Value": f"{min_repayment_term} / {max_repayment_term}", "Source": "Business constraint"},
             ])
             st.write("**Audit table**")
-            st.code("odds_ref = PD_ref / (1 - PD_ref)\nodds(amount) = odds_ref x (1 + sensitivity)^((amount - reference amount) / 100)\nPD(amount) = odds(amount) / (1 + odds(amount))\nUE(amount) = revenue - expected credit loss - funding cost - operating cost - expected collection cost")
+            st.code("PD(A) = linear interpolation between the visible anchors: ($200, PD_200), ($500, PD_500), and ($1,000, PD_1000).\nRevenue(A) = A x Fee\nECL(A) = A x PD(A) x LGD\nExpected Collection Cost(A) = PD(A) x Collection Cost per Default\nUE(A) = Revenue(A) - ECL(A) - Funding Cost - Operating Cost - Expected Collection Cost(A)")
             audit_rows = []
             for amount in [200, 350, 500, 800, 1000]:
-                pd_at_amount = expected_pd_by_loan_amount(amount, PRIOR_EXPECTED_PD, REFERENCE_LOAN_AMOUNT, LOAN_AMOUNT_RISK_SENSITIVITY)
+                pd_at_amount = expected_pd_by_loan_amount(amount, PRIOR_EXPECTED_PD, MID_TICKET_PD, HIGH_TICKET_PD)
                 expected_ue_at_amount = expected_unit_economics_per_loan(amount, RECOMMENDED_FEE_RATE, pd_at_amount, LGD, FUNDING_COST, OPERATING_COST, COLLECTION_COST_PER_DEFAULT)
                 cohort_exposure = INITIAL_COHORT * amount
                 cohort_credit_loss = INITIAL_COHORT * amount * pd_at_amount * LGD
@@ -602,20 +616,38 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
                     violated_constraints.append("Maximum portfolio exposure")
                 if cohort_credit_loss > max_learning_loss:
                     violated_constraints.append("Credit-loss budget")
+                if pd_at_amount > max_default_rate / 100:
+                    violated_constraints.append("Maximum acceptable default rate")
+                if not min_pricing <= RECOMMENDED_FEE_RATE * 100 <= max_pricing:
+                    violated_constraints.append("Pricing range")
                 audit_rows.append({
                     "Loan Amount": money(amount),
                     "Expected PD": pct(pd_at_amount),
+                    "Fee": pct(RECOMMENDED_FEE_RATE),
                     "Revenue": money(amount * RECOMMENDED_FEE_RATE),
                     "Expected Credit Loss": money(amount * pd_at_amount * LGD),
                     "Funding Cost": money(FUNDING_COST),
                     "Operating Cost": money(OPERATING_COST),
                     "Expected Collection Cost": money(pd_at_amount * COLLECTION_COST_PER_DEFAULT),
                     "Expected Unit Economics": money(expected_ue_at_amount),
+                    "Break-even PD": pct(break_even_default_rate(amount, RECOMMENDED_FEE_RATE, LGD, FUNDING_COST, OPERATING_COST, COLLECTION_COST_PER_DEFAULT)),
+                    "Repayment Term": f"{evaluation_term} installment(s)",
+                    "Initial Cohort Size": INITIAL_COHORT,
+                    "Initial Cohort Exposure": money(cohort_exposure),
+                    "Expected Cohort Credit Loss": money(cohort_credit_loss),
                     "Feasible?": "Yes" if not violated_constraints else "No",
                     "Constraint violated": ", ".join(violated_constraints) or "None",
+                    "Decision classification": "Recommended start" if amount == RECOMMENDED_LOAN else ("Feasible candidate" if not violated_constraints else "Infeasible candidate"),
                 })
             audit_curve = pd.DataFrame(audit_rows)
             st.table(audit_curve)
+            risk_response = pd.DataFrame({"Loan Amount": curve_amounts, "Expected PD": expected_pd_by_loan_amount(curve_amounts, PRIOR_EXPECTED_PD, MID_TICKET_PD, HIGH_TICKET_PD)})
+            risk_anchors = pd.DataFrame({"Loan Amount": [200, 500, 1000], "Expected PD": [PRIOR_EXPECTED_PD, MID_TICKET_PD, HIGH_TICKET_PD]})
+            st.caption("Assumed Risk Response")
+            risk_line = alt.Chart(risk_response).mark_line(color="#20745d", strokeWidth=2).encode(x=alt.X("Loan Amount:Q", title="Loan Amount ($)", axis=alt.Axis(format="$,.0f")), y=alt.Y("Expected PD:Q", title="Expected PD (%)", axis=alt.Axis(format=".0%")))
+            risk_points = alt.Chart(risk_anchors).mark_point(filled=True, size=90, color="#c54c2e").encode(x="Loan Amount:Q", y="Expected PD:Q", tooltip=[alt.Tooltip("Loan Amount:Q", format="$,.0f"), alt.Tooltip("Expected PD:Q", format=".1%")])
+            st.altair_chart((risk_line + risk_points).properties(height=220), use_container_width=True)
+            st.caption("The risk-belief curve represents the current belief before sufficient local performance evidence exists. As repayment outcomes mature, these beliefs can be updated and the opportunity curve recalculated.")
     
     # ========== DECISION 1: WHO AND HOW MANY ==========
     with st.container(border=True):
@@ -688,7 +720,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         with dec2_c1:
             st.metric("Recommended loan amount", "$200")
         with dec2_c2:
-            st.metric("Recommended term", "1 installment")
+            st.metric("Recommended term", f"{RECOMMENDED_TERM} installment{'s' if RECOMMENDED_TERM != 1 else ''}")
         with dec2_c3:
             st.metric("Recommended fee", "20%")
         
@@ -772,16 +804,17 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         with st.expander("Why this recommendation?"):
             product_rows = []
             amount_rows = []
+            term_candidates = [term for term in [1, 2, 4, 6] if min_repayment_term <= term <= max_repayment_term]
             for amount in [200, 350, 500, 800, 1000]:
                 revenue = amount * recommended_fee_rate
-                pd_at_amount = expected_pd_by_loan_amount(amount, expected_pd, REFERENCE_LOAN_AMOUNT, LOAN_AMOUNT_RISK_SENSITIVITY)
+                pd_at_amount = expected_pd_by_loan_amount(amount, expected_pd, MID_TICKET_PD, HIGH_TICKET_PD)
                 credit_loss = pd_at_amount * lgd * amount
                 expected_collections = pd_at_amount * collection_cost
                 ue = expected_unit_economics_per_loan(amount, recommended_fee_rate, pd_at_amount, lgd, funding_cost, operating_cost, collection_cost)
                 learning_loss_capacity = int(max_learning_loss // credit_loss)
                 exposure_capacity = int(max_portfolio_exposure // amount)
                 amount_rows.append({"Loan amount": f"${amount:,.0f}", "Expected UE / loan": round(ue, 2)})
-                for term in [1, 2, 4, 6]:
+                for term in term_candidates:
                     product_rows.append({
                         "Loan": f"${amount:,.0f}", "Term": f"{term} installment(s)", "Revenue": money(revenue),
                         "Expected credit loss": money(credit_loss), "Funding": money(funding_cost),
@@ -806,7 +839,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.caption("Unit Economics by Candidate Loan Amount")
             st.bar_chart(pd.DataFrame(amount_rows).set_index("Loan amount"), use_container_width=True)
             st.caption("Zero on the chart is the break-even reference: values above zero have positive expected Unit Economics.")
-            term_rows = pd.DataFrame({"Term": ["1 installment", "2 installments", "4 installments", "6 installments"], "Relative time to mature": [1, 2, 4, 6]}).set_index("Term")
+            term_rows = pd.DataFrame({"Term": [f"{term} installment{'s' if term != 1 else ''}" for term in term_candidates], "Relative time to mature": term_candidates}).set_index("Term")
             st.caption("Evidence Maturity by Repayment Term")
             st.bar_chart(term_rows, use_container_width=True)
             st.write("**Calculation**")
@@ -818,7 +851,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.write("**What would change the result?**")
             st.caption("Observed repayment performance, pricing, loss severity, funding cost, operating cost, collection cost, or the learning budget.")
             st.write("**Reproduce this decision**")
-            st.code(f"For $200, 1 installment:\nRevenue = $200 x {recommended_fee_rate:.2f} = {money(expected_revenue)}\nExpected Credit Loss = $200 x {expected_pd:.2f} x {lgd:.2f} = {money(expected_credit_loss)}\nExpected Collection Cost = {expected_pd:.2f} x {money(collection_cost)} = {money(expected_collection_cost)}\nExpected UE = {money(expected_revenue)} - {money(expected_credit_loss)} - {money(funding_cost)} - {money(operating_cost)} - {money(expected_collection_cost)} = {money(expected_ue)}\nEconomic headroom = {pct(break_even_pd)} - {pct(expected_pd)} = {economic_headroom * 100:.1f} pp")
+            st.code(f"For $200, {recommended_term} installment(s):\nRevenue = $200 x {recommended_fee_rate:.2f} = {money(expected_revenue)}\nExpected Credit Loss = $200 x {expected_pd:.2f} x {lgd:.2f} = {money(expected_credit_loss)}\nExpected Collection Cost = {expected_pd:.2f} x {money(collection_cost)} = {money(expected_collection_cost)}\nExpected UE = {money(expected_revenue)} - {money(expected_credit_loss)} - {money(funding_cost)} - {money(operating_cost)} - {money(expected_collection_cost)} = {money(expected_ue)}\nEconomic headroom = {pct(break_even_pd)} - {pct(expected_pd)} = {economic_headroom * 100:.1f} pp")
             audit_inputs([
                 {"Parameter": "Candidate loans", "Value": "$200, $350, $500, $800, $1,000", "Source": "Model assumption"},
                 {"Parameter": "Candidate terms", "Value": "1, 2, 4, 6", "Source": "Model assumption"},
@@ -966,17 +999,17 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         st.divider()
         st.write("**RISK EVIDENCE**")
         belief_c1, belief_c2 = st.columns(2)
-        
-        with belief_c1:
-            prior_mean_pd = st.number_input("Expected PD at reference loan amount", min_value=0.01, max_value=0.60, value=PRIOR_EXPECTED_PD, step=0.01, key="model_prior_expected_pd", help="Synthetic comparable-market assumption for the population default rate at the reference loan amount, before local outcomes are observed.")
         with belief_c2:
             prior_strength = st.number_input("Prior strength", min_value=2.0, max_value=200.0, value=PRIOR_STRENGTH, step=1.0, key="model_prior_strength", help="How much confidence the engine places in the starting evidence. Higher values make new observations change the initial expectation more slowly.")
 
-        risk_c1, risk_c2 = st.columns(2)
+        st.caption("These values represent the current belief about how repayment risk changes with loan size. They are assumptions until local repayment evidence becomes available.")
+        risk_c1, risk_c2, risk_c3 = st.columns(3)
         with risk_c1:
-            reference_loan_amount = st.number_input("Reference loan amount", min_value=100.0, max_value=max_loan_amount, value=REFERENCE_LOAN_AMOUNT, step=50.0, key="model_reference_loan_amount", help="Synthetic reference ticket at which the expected PD assumption is defined.")
+            prior_mean_pd = st.number_input("Expected PD at $200", min_value=0.01, max_value=0.99, value=PRIOR_EXPECTED_PD, step=0.01, key="model_prior_expected_pd", help="Synthetic comparable-market assumption at the reference ticket.")
         with risk_c2:
-            loan_amount_risk_sensitivity = st.number_input("Loan amount risk sensitivity", min_value=0.0, max_value=1.0, value=LOAN_AMOUNT_RISK_SENSITIVITY, step=0.01, format="%.2f", key="model_loan_amount_risk_sensitivity", help="Synthetic assumption: percentage increase in default odds for each additional $100 above the reference loan amount. The curve uses odds(amount) = odds_ref x (1 + sensitivity)^((amount - reference amount) / 100).")
+            mid_ticket_pd = st.number_input("Expected PD at $500", min_value=0.01, max_value=0.99, value=MID_TICKET_PD, step=0.01, key="model_mid_ticket_pd", help="Synthetic risk belief at the mid ticket.")
+        with risk_c3:
+            high_ticket_pd = st.number_input("Expected PD at $1,000", min_value=0.01, max_value=0.99, value=HIGH_TICKET_PD, step=0.01, key="model_high_ticket_pd", help="Synthetic risk belief at the high ticket.")
         
         with st.expander("Technical Decision Rules"):
             engine_c1, engine_c2, engine_c3 = st.columns(3)
