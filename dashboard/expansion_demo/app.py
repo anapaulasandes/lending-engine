@@ -667,6 +667,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
                 exposure_utilization = initial_exposure / max_portfolio_exposure
                 qualifies = standard_deviation <= 0.06 and exposure_utilization <= 0.10
                 cohort_rows.append({
+                    "Cohort size": cohort_size,
                     "Cohort": f"{cohort_size} customers",
                     "Uncertainty (percentage points)": round(standard_deviation * 100, 2),
                     "Initial principal exposure": money(initial_exposure),
@@ -682,7 +683,12 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.caption("10, 25, 50 and 100 customers.")
             st.write("**Comparison chart**")
             st.caption("Evidence gained by initial cohort size")
-            st.bar_chart(pd.DataFrame(cohort_rows).set_index("Cohort")["Uncertainty (percentage points)"], use_container_width=True)
+            cohort_chart = alt.Chart(pd.DataFrame(cohort_rows)).mark_line(color="#20745d", strokeWidth=2).encode(
+                x=alt.X("Cohort size:Q", title="Initial cohort size (customers)", scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y("Uncertainty (percentage points):Q", title="Posterior standard deviation (pp)", scale=alt.Scale(zero=False)),
+                tooltip=["Cohort size:Q", "Uncertainty (percentage points):Q", "Initial principal exposure:N", "Exposure utilization:N", "Result:N"],
+            ) + alt.Chart(pd.DataFrame(cohort_rows)).mark_point(filled=True, size=70, color="#20745d").encode(x="Cohort size:Q", y="Uncertainty (percentage points):Q")
+            st.altair_chart(cohort_chart, use_container_width=True)
             st.table(pd.DataFrame(cohort_rows))
             st.caption("Larger cohorts reduce uncertainty, but require more capital to be committed before the first policy review.")
             st.write("**Calculation**")
@@ -805,7 +811,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
                 ue = expected_unit_economics_per_loan(amount, recommended_fee_rate, pd_at_amount, lgd, funding_cost, operating_cost, collection_cost)
                 learning_loss_capacity = int(max_learning_loss // credit_loss)
                 exposure_capacity = int(max_portfolio_exposure // amount)
-                amount_rows.append({"Loan amount": f"${amount:,.0f}", "Expected UE / loan": round(ue, 2)})
+                amount_rows.append({"Loan amount": amount, "Expected UE / loan": round(ue, 2)})
                 for term in term_candidates:
                     product_rows.append({
                         "Loan": f"${amount:,.0f}", "Term": f"{term} installment(s)", "Revenue": money(revenue),
@@ -829,11 +835,22 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.table(pd.DataFrame(product_rows))
             st.write("**Comparison chart**")
             st.caption("Unit Economics by Candidate Loan Amount")
-            st.bar_chart(pd.DataFrame(amount_rows).set_index("Loan amount"), use_container_width=True)
+            amount_chart_data = pd.DataFrame(amount_rows)
+            amount_chart = alt.Chart(amount_chart_data).mark_line(color="#20745d", strokeWidth=2).encode(
+                x=alt.X("Loan amount:Q", title="Loan amount ($)", scale=alt.Scale(domain=[200, 1000]), axis=alt.Axis(format="$,.0f")),
+                y=alt.Y("Expected UE / loan:Q", title="Expected Unit Economics / loan ($)"),
+                tooltip=[alt.Tooltip("Loan amount:Q", format="$,.0f"), alt.Tooltip("Expected UE / loan:Q", format="$,.2f")],
+            ) + alt.Chart(amount_chart_data).mark_point(filled=True, size=70, color="#20745d").encode(x="Loan amount:Q", y="Expected UE / loan:Q")
+            st.altair_chart(amount_chart, use_container_width=True)
             st.caption("Zero on the chart is the break-even reference: values above zero have positive expected Unit Economics.")
-            term_rows = pd.DataFrame({"Term": [f"{term} installment{'s' if term != 1 else ''}" for term in term_candidates], "Relative time to mature": term_candidates}).set_index("Term")
+            term_rows = pd.DataFrame({"Term": term_candidates, "Relative time to mature": term_candidates})
             st.caption("Evidence Maturity by Repayment Term")
-            st.bar_chart(term_rows, use_container_width=True)
+            term_chart = alt.Chart(term_rows).mark_line(color="#20745d", strokeWidth=2).encode(
+                x=alt.X("Term:Q", title="Repayment term (installments)", scale=alt.Scale(domain=[min_repayment_term, max_repayment_term])),
+                y=alt.Y("Relative time to mature:Q", title="Time to mature evidence (cycles)", scale=alt.Scale(zero=True)),
+                tooltip=["Term:Q", "Relative time to mature:Q"],
+            ) + alt.Chart(term_rows).mark_point(filled=True, size=70, color="#20745d").encode(x="Term:Q", y="Relative time to mature:Q")
+            st.altair_chart(term_chart, use_container_width=True)
             st.write("**Calculation**")
             st.code("Expected Revenue = Loan Amount x Fee Rate\nExpected Credit Loss = PD x LGD x Loan Amount\nExpected Collection Cost = PD x Collection Cost per Default\nExpected UE = Revenue - Expected Credit Loss - Funding Cost - Operating Cost - Expected Collection Cost")
             st.write("**Selection rule**")
@@ -879,9 +896,9 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         with st.expander("Why this recommendation?"):
             gate_candidates = [10, 25, 50, 100]
             gate_rows = pd.DataFrame({
-                "Deployment gate": [f"{customers} customers" for customers in gate_candidates],
+                "Customers before review": gate_candidates,
                 "Capital committed before review": [customers * RECOMMENDED_LOAN for customers in gate_candidates],
-            }).set_index("Deployment gate")
+            })
             st.write("**Decision logic**")
             st.caption("Decision 1 selects the number of first observations. This decision controls how much capital is committed before the lender can react to those observations.")
             st.write("**Inputs used**")
@@ -890,7 +907,12 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.caption("10, 25, 50 and 100 customers originated before the first evidence review.")
             st.write("**Comparison chart**")
             st.caption("Capital at Risk Before First Policy Update")
-            st.bar_chart(gate_rows, use_container_width=True)
+            gate_chart = alt.Chart(gate_rows).mark_line(color="#20745d", strokeWidth=2).encode(
+                x=alt.X("Customers before review:Q", title="Customers originated before review", scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y("Capital committed before review:Q", title="Capital at risk before update ($)", scale=alt.Scale(zero=True), axis=alt.Axis(format="$,.0f")),
+                tooltip=["Customers before review:Q", alt.Tooltip("Capital committed before review:Q", format="$,.2f")],
+            ) + alt.Chart(gate_rows).mark_point(filled=True, size=70, color="#20745d").encode(x="Customers before review:Q", y="Capital committed before review:Q")
+            st.altair_chart(gate_chart, use_container_width=True)
             st.write("**Calculation**")
             st.code("Capital committed before review = customers originated before evidence gate x initial loan amount")
             st.write("**Selection rule**")
@@ -946,7 +968,13 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.caption("The selected initial cohort, loan amount and term against each hard constraint.")
             st.write("**Comparison chart**")
             st.caption("Hard constraint utilization; all values start at zero and represent the share of each limit used.")
-            st.bar_chart(utilization_rows, use_container_width=True)
+            constraint_order = ["Credit-loss budget", "Portfolio exposure", "Pilot capacity", "Loan amount ceiling", "Repayment term ceiling"]
+            utilization_chart = alt.Chart(utilization_rows.reset_index()).mark_bar(color="#20745d").encode(
+                x=alt.X("Constraint:N", title=None, sort=constraint_order),
+                y=alt.Y("Utilization (%):Q", title="Constraint utilization (%)", scale=alt.Scale(domain=[0, 100])),
+                tooltip=["Constraint:N", alt.Tooltip("Utilization (%):Q", format=".1f")],
+            )
+            st.altair_chart(utilization_chart, use_container_width=True)
             st.write("**Calculation**")
             st.code(f"Expected Credit Loss - Initial Cohort = cohort size x loan amount x PD x LGD\n= {INITIAL_COHORT} x $200 x {expected_pd:.2f} x {lgd:.2f}\n= {money(expected_learning_loss)}\n\nCredit-loss budget utilization = {money(expected_learning_loss)} / {money(max_learning_loss)} = {expected_learning_loss / max_learning_loss:.1%}\nExposure utilization = {money(expected_exposure)} / {money(max_portfolio_exposure)} = {expected_exposure / max_portfolio_exposure:.1%}\nCapacity utilization = {INITIAL_COHORT} / {max_pilot_capacity} = {INITIAL_COHORT / max_pilot_capacity:.1%}\nLoan ceiling utilization = $200 / {money(max_loan_amount)} = {RECOMMENDED_LOAN / max_loan_amount:.1%}\nTerm utilization = 1 / {max_repayment_term} = {RECOMMENDED_TERM / max_repayment_term:.1%}")
             st.write("**Selection rule**")
