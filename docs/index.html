@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Credit Expansion Decisioning project documentation.">
+  <title>Credit Expansion Decisioning</title>
+  <style>
+    :root {
+      --ink: #16302b;
+      --muted: #597068;
+      --paper: #f6f4ec;
+      --surface: #ffffff;
+      --line: #d6ddd5;
+      --accent: #c54c2e;
+      --accent-soft: #f5dfd5;
+      --forest: #20745d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.5;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 28px 24px 64px; }
+    header { border-bottom: 1px solid var(--line); padding-bottom: 42px; }
+    .eyebrow { color: var(--accent); font: 700 0.8rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.08em; text-transform: uppercase; }
+    h1 { max-width: 770px; margin: 18px 0 14px; font-size: clamp(2.5rem, 7vw, 5.5rem); line-height: 0.94; letter-spacing: 0; }
+    .lede { max-width: 680px; color: var(--muted); font-size: 1.15rem; }
+    .status { display: inline-block; margin-top: 14px; padding: 5px 9px; border: 1px solid var(--forest); color: var(--forest); font: 700 0.75rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 42px 0; border: 1px solid var(--line); background: var(--line); }
+    .step { min-height: 165px; padding: 18px; background: var(--surface); }
+    .step b { display: block; margin-bottom: 28px; color: var(--accent); font: 700 0.75rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .step h2 { margin: 0; font-size: 1.1rem; line-height: 1.1; }
+    section { display: grid; grid-template-columns: 1fr 1fr; gap: 54px; padding: 36px 0; border-top: 1px solid var(--line); }
+    h3 { margin: 0; font-size: 1.55rem; line-height: 1.08; }
+    p { margin: 0 0 16px; }
+    ul { margin: 0; padding-left: 20px; }
+    li { margin-bottom: 8px; }
+    .callout { padding: 22px; background: var(--accent-soft); border-left: 4px solid var(--accent); }
+    a { color: var(--ink); font-weight: 700; text-decoration-color: var(--accent); text-decoration-thickness: 2px; text-underline-offset: 3px; }
+    code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace; }
+    footer { padding-top: 28px; color: var(--muted); font-size: 0.9rem; }
+    @media (max-width: 720px) {
+      main { padding: 20px 16px 44px; }
+      header { padding-bottom: 30px; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 30px 0; }
+      section { grid-template-columns: 1fr; gap: 18px; padding: 28px 0; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">Lending Engine / Panama Expansion</div>
+      <h1>Credit Expansion Decisioning</h1>
+      <p class="lede">An auditable decision-support prototype for staged credit-market expansion, using Belize comparable-market evidence to guide an initial Panama lending policy.</p>
+      <span class="status">Illustrative MVP</span>
+    </header>
+
+    <div class="grid" aria-label="Decision flow">
+      <article class="step"><b>STEP 01</b><h2>Understand the market</h2></article>
+      <article class="step"><b>STEP 02</b><h2>Set business constraints</h2></article>
+      <article class="step"><b>STEP 03</b><h2>Recommend an initial policy</h2></article>
+      <article class="step"><b>STEP 04</b><h2>Learn from repayment evidence</h2></article>
+    </div>
+
+    <section>
+      <h3>Built for inspection, not black boxes.</h3>
+      <div>
+        <p>Each recommendation can be opened to inspect inputs, candidates, formulas, decision rules, derived values, and source categories.</p>
+        <p>The default learning policy begins with a small cohort and limited exposure, then updates as mature local outcomes become available.</p>
+      </div>
+    </section>
+
+    <section>
+      <h3>Run the interactive dashboard.</h3>
+      <div>
+        <p>The live dashboard requires a Python runtime and is deployed separately from GitHub Pages.</p>
+        <div class="callout">Set the public Streamlit deployment URL here after hosting the dashboard. For local development, run <code>streamlit run dashboard/expansion_demo/app.py</code>.</div>
+      </div>
+    </section>
+
+    <section>
+      <h3>Project resources.</h3>
+      <div>
+        <ul>
+          <li><a href="data-contract-v0.md">Data contract</a></li>
+          <li>Project setup, local run instructions, and auditability notes are available in this repository's README.</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer>All values are illustrative and do not constitute credit-policy advice.</footer>
+  </main>
+</body>
+</html>
