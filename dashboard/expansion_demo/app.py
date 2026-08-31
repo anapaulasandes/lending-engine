@@ -26,7 +26,7 @@ from engine.sequential_learning import (
 )
 
 
-st.set_page_config(page_title="Credit Expansion Decisioning", page_icon="C", layout="wide")
+st.set_page_config(page_title="Ana Souza's Credit Expansion Decisioning", page_icon="C", layout="wide")
 
 st.markdown(
     """
@@ -172,7 +172,7 @@ MARKET_SEGMENTS = {
     },
 }
 
-st.title("CREDIT EXPANSION DECISIONING")
+st.title("ANA SOUZA'S CREDIT EXPANSION DECISIONING")
 st.caption("Structured evidence and quantitative decisions for credit market entry.")
 st.caption("Illustrative case study. All portfolio assumptions, risk parameters, business constraints and numerical results are synthetic and do not represent proprietary company data. Public market information is used only for contextual illustration.")
 
@@ -1027,25 +1027,11 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
     
     st.divider()
     
-    # CTA to Step 4
-    col_s4_1, col_s4_2, col_s4_3 = st.columns([1, 2, 1])
-    with col_s4_2:
-        proceed_to_step4 = st.button(
-            "Define Learning & Scaling Rules",
-            use_container_width=True,
-            type="primary",
-            key="proceed_to_step4"
-        )
-    
-    if proceed_to_step4:
-        st.session_state.step4_ready = True
-        st.rerun()
-
 # ============================================================================
 # STEP 4 - LEARN & ADAPT: Learning & Scaling Rules
 # ============================================================================
 
-if st.session_state.step1_completed and st.session_state.step2_completed and st.session_state.step3_completed and st.session_state.get("step4_ready", False):
+if st.session_state.step1_completed and st.session_state.step2_completed and st.session_state.step3_completed:
     st.divider()
     st.header("Step 4 - Learning & Adaptation")
     st.caption("How observed repayment evidence updates expectations and informs the next decision.")
@@ -1061,6 +1047,18 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
     
     with st.container(border=True):
         st.subheader("How Our Risk Expectation Changes")
+        illustrative_defaults = 1
+        illustrative_repayments = 9
+        updated_alpha = PRIOR_ALPHA + illustrative_defaults
+        updated_beta = PRIOR_BETA + illustrative_repayments
+        risk_grid = np.linspace(0.001, 0.35, 120)
+        prior_density = np.exp((PRIOR_ALPHA - 1) * np.log(risk_grid) + (PRIOR_BETA - 1) * np.log(1 - risk_grid))
+        updated_density = np.exp((updated_alpha - 1) * np.log(risk_grid) + (updated_beta - 1) * np.log(1 - risk_grid))
+        distribution_df = pd.DataFrame({
+            "Default rate": risk_grid,
+            "Initial risk distribution": prior_density / prior_density.max(),
+            "Updated risk distribution": updated_density / updated_density.max(),
+        })
         update_c1, update_a1, update_c2, update_a2, update_c3, update_a3, update_c4 = st.columns([2, 0.4, 2, 0.4, 2, 0.4, 2])
         with update_c1:
             st.write("**INITIAL EXPECTATION**")
@@ -1085,17 +1083,19 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.write("**NEXT DECISION**")
             st.caption("Hold / Increase / Reduce exposure")
 
+        distribution_chart = alt.Chart(distribution_df).transform_fold(
+            ["Initial risk distribution", "Updated risk distribution"],
+            as_=["Distribution", "Relative density"],
+        ).mark_line(strokeWidth=2).encode(
+            x=alt.X("Default rate:Q", title="Expected default rate", axis=alt.Axis(format=".0%")),
+            y=alt.Y("Relative density:Q", title="Relative probability density"),
+            color=alt.Color("Distribution:N", legend=alt.Legend(title=None)),
+            tooltip=[alt.Tooltip("Default rate:Q", format=".1%"), "Distribution:N", alt.Tooltip("Relative density:Q", format=".3f")],
+        ).properties(height=260)
+        st.altair_chart(distribution_chart, use_container_width=True)
+        st.caption("This chart updates when Expected PD at $200 or Prior strength changes. The 9 repaid / 1 default scenario is synthetic and fixed deliberately for this MVP.")
+
         with st.expander("How is this updated?"):
-            updated_alpha = PRIOR_ALPHA + 1
-            updated_beta = PRIOR_BETA + 9
-            risk_grid = np.linspace(0.001, 0.35, 120)
-            prior_density = np.exp((PRIOR_ALPHA - 1) * np.log(risk_grid) + (PRIOR_BETA - 1) * np.log(1 - risk_grid))
-            updated_density = np.exp((updated_alpha - 1) * np.log(risk_grid) + (updated_beta - 1) * np.log(1 - risk_grid))
-            distribution_df = pd.DataFrame({
-                "Default rate": risk_grid,
-                "Initial risk distribution": prior_density / prior_density.max(),
-                "Updated risk distribution": updated_density / updated_density.max(),
-            }).set_index("Default rate")
             st.write("**Decision logic**")
             st.caption("Update the local risk expectation after mature repayment outcomes become available.")
             st.write("**Inputs used**")
@@ -1103,8 +1103,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.write("**Candidates evaluated**")
             st.caption("Initial risk distribution and the distribution after the observed cohort outcomes.")
             st.write("**Comparison chart**")
-            st.caption("Initial and updated risk distributions")
-            st.line_chart(distribution_df, use_container_width=True)
+            st.caption("Initial and updated risk distributions are shown above. They update from the visible risk-evidence inputs; the synthetic outcome scenario remains fixed in this MVP.")
             st.write("**Calculation**")
             st.code(f"Initial Beta prior: alpha = {PRIOR_ALPHA:.0f}, beta = {PRIOR_BETA:.0f}\nIllustrative observed outcomes: 1 default, 9 repayments\nalpha_updated = {PRIOR_ALPHA:.0f} + 1 = {updated_alpha:.0f}\nbeta_updated = {PRIOR_BETA:.0f} + 9 = {updated_beta:.0f}\nUpdated expected PD = {updated_alpha:.0f} / ({updated_alpha:.0f} + {updated_beta:.0f}) = {pct(updated_alpha / (updated_alpha + updated_beta))}")
             st.write("**Selection rule**")
