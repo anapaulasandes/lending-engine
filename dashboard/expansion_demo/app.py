@@ -193,6 +193,7 @@ st.caption("Describe the market opportunity. We will structure it and identify c
 
 with st.container(border=True):
     st.subheader("Market Opportunity")
+    st.caption("Illustrative product request for a synthetic mock product. It is provided only to demonstrate the decisioning workflow.")
     
     opportunity_description = st.text_area(
         "Your opportunity:",
