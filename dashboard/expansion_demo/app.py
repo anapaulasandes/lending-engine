@@ -197,7 +197,7 @@ with st.container(border=True):
     
     opportunity_description = st.text_area(
         "Your opportunity:",
-        value="We are considering launching an unsecured installment loan in Panama for lower-to-middle income salaried consumers. Our target customers have verifiable recurring employment income but may have limited access to traditional bank credit or insufficient credit history for conventional underwriting. The product would address short-term liquidity needs and unexpected household expenses through relatively small, fixed-payment installment loans. We currently have no direct repayment history for this population in Panama, but we operate a comparable consumer lending product in Belize.",
+        value="Illustrative request for a synthetic mock product: We are considering launching an unsecured installment loan in Panama for lower-to-middle income salaried consumers. Our target customers have verifiable recurring employment income but may have limited access to traditional bank credit or insufficient credit history for conventional underwriting. The product would address short-term liquidity needs and unexpected household expenses through relatively small, fixed-payment installment loans. We currently have no direct repayment history for this population in Panama, but we operate a comparable consumer lending product in Belize.",
         height=150,
         label_visibility="collapsed",
     )
