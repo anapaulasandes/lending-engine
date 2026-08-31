@@ -86,13 +86,14 @@ def expected_unit_economics_per_loan(
     pricing_rate: float,
     expected_pd: float,
     lgd: float,
-    funding_cost: float,
+    funding_cost_rate: float,
     operating_cost: float,
     collection_cost: float,
 ) -> float:
     contractual_revenue = contract_revenue(loan_amount, pricing_rate)
     expected_loss = expected_pd * loan_amount * lgd
     expected_collection_cost = expected_pd * collection_cost
+    funding_cost = loan_amount * funding_cost_rate
     return contractual_revenue - expected_loss - funding_cost - operating_cost - expected_collection_cost
 
 
@@ -100,11 +101,11 @@ def break_even_default_rate(
     loan_amount: float,
     pricing_rate: float,
     lgd: float,
-    funding_cost: float,
+    funding_cost_rate: float,
     operating_cost: float,
     collection_cost: float,
 ) -> float:
-    return (loan_amount * pricing_rate - funding_cost - operating_cost) / (loan_amount * lgd + collection_cost)
+    return (loan_amount * pricing_rate - loan_amount * funding_cost_rate - operating_cost) / (loan_amount * lgd + collection_cost)
 
 
 def expected_pd_by_loan_amount(
@@ -117,6 +118,61 @@ def expected_pd_by_loan_amount(
     anchors = np.array([200.0, 500.0, 1000.0])
     beliefs = np.array([reference_pd, mid_pd, high_pd])
     return np.interp(loan_amount, anchors, beliefs)
+
+
+def evaluate_policy(
+    loan_amount: float,
+    repayment_term: int,
+    cohort_size: int,
+    pd_200: float,
+    pd_500: float,
+    pd_1000: float,
+    fee_rate: float,
+    funding_rate: float,
+    operating_cost: float,
+    collection_cost: float,
+    lgd: float,
+    constraints: Dict[str, float],
+) -> Dict[str, float | bool | str]:
+    """Evaluate one candidate policy from the shared public MVP assumptions."""
+    expected_pd = float(expected_pd_by_loan_amount(loan_amount, pd_200, pd_500, pd_1000))
+    revenue = loan_amount * fee_rate
+    funding_cost = loan_amount * funding_rate
+    expected_credit_loss = loan_amount * expected_pd * lgd
+    expected_collection_cost = expected_pd * collection_cost
+    expected_ue = revenue - expected_credit_loss - funding_cost - operating_cost - expected_collection_cost
+    break_even_pd = break_even_default_rate(loan_amount, fee_rate, lgd, funding_rate, operating_cost, collection_cost)
+    cohort_exposure = cohort_size * loan_amount
+    cohort_expected_credit_loss = cohort_size * expected_credit_loss
+    violations = []
+    if loan_amount > constraints["max_loan_amount"]:
+        violations.append("Maximum loan amount")
+    if cohort_exposure > constraints["max_portfolio_exposure"]:
+        violations.append("Maximum portfolio exposure")
+    if cohort_expected_credit_loss > constraints["max_credit_loss_budget"]:
+        violations.append("Credit-loss budget")
+    if cohort_size > constraints["max_pilot_capacity"]:
+        violations.append("Pilot capacity")
+    if not constraints["min_repayment_term"] <= repayment_term <= constraints["max_repayment_term"]:
+        violations.append("Repayment term")
+    if expected_pd > constraints["max_default_rate"]:
+        violations.append("Maximum acceptable default rate")
+    if not constraints["min_pricing"] <= fee_rate <= constraints["max_pricing"]:
+        violations.append("Pricing range")
+    return {
+        "expected_pd": expected_pd,
+        "revenue": revenue,
+        "funding_cost": funding_cost,
+        "operating_cost": operating_cost,
+        "expected_collection_cost": expected_collection_cost,
+        "expected_credit_loss": expected_credit_loss,
+        "expected_unit_economics": expected_ue,
+        "break_even_pd": break_even_pd,
+        "cohort_exposure": cohort_exposure,
+        "cohort_expected_credit_loss": cohort_expected_credit_loss,
+        "feasible": not violations,
+        "constraint_violated": ", ".join(violations) or "None",
+    }
 
 
 def audit_inputs(rows: List[Dict[str, str]]) -> None:
@@ -132,12 +188,14 @@ RECOMMENDED_LOAN = 200.0
 RECOMMENDED_TERM = max(1, int(st.session_state.get("constraint_min_repayment_term", 1)))
 RECOMMENDED_FEE_RATE = 0.20
 LGD = float(st.session_state.get("model_lgd", 0.70))
-FUNDING_COST = float(st.session_state.get("model_funding_cost", 15.0))
+FUNDING_RATE = float(st.session_state.get("model_funding_rate", 0.075))
 OPERATING_COST = float(st.session_state.get("model_operating_cost", 10.0))
 COLLECTION_COST_PER_DEFAULT = float(st.session_state.get("model_collection_cost", 5.0))
 MID_TICKET_PD = float(st.session_state.get("model_mid_ticket_pd", 0.12))
 HIGH_TICKET_PD = float(st.session_state.get("model_high_ticket_pd", 0.18))
 INITIAL_COHORT = 10
+MAX_PLANNING_POSTERIOR_SD = 0.06
+MAX_INITIAL_EXPOSURE_SHARE = 0.10
 
 
 def metric_label_with_tooltip(label: str, tooltip: str) -> None:
@@ -197,7 +255,7 @@ with st.container(border=True):
     
     opportunity_description = st.text_area(
         "Your opportunity:",
-        value="Illustrative request for a synthetic mock product: We are considering launching an unsecured installment loan in Panama for lower-to-middle income salaried consumers. Our target customers have verifiable recurring employment income but may have limited access to traditional bank credit or insufficient credit history for conventional underwriting. The product would address short-term liquidity needs and unexpected household expenses through relatively small, fixed-payment installment loans. We currently have no direct repayment history for this population in Panama, but we operate a comparable consumer lending product in Belize.",
+        value="Illustrative request for a synthetic mock product: We are considering launching an unsecured installment loan in Panama for lower-to-middle income salaried consumers. Our target customers have verifiable recurring employment income but may have limited access to traditional bank credit or insufficient credit history for conventional underwriting. The product would address short-term liquidity needs and unexpected household expenses through relatively small, fixed-payment installment loans. We currently have no direct repayment history for this population in Panama, but we operate a comparable consumer lending product in Lumeria (fictional).",
         height=150,
         label_visibility="collapsed",
     )
@@ -227,15 +285,15 @@ if run_assessment or st.session_state.step1_completed:
         # Assessment metrics
         assess_c1, assess_c2, assess_c3, assess_c4 = st.columns(4)
         assess_c1.metric("Target population", "Salaried consumers")
-        assess_c2.metric("Product fit", "High")
-        assess_c3.metric("Confidence", "Medium")
-        assess_c4.metric("Expected risk", "Moderate")
+        assess_c2.metric("Product fit", "High", help="Illustrative qualitative assessment based on target product design.")
+        assess_c3.metric("Confidence", "Medium", help="Illustrative qualitative assessment; no formal confidence score is calculated in this MVP.")
+        assess_c4.metric("Expected risk", "Moderate", help="Illustrative qualitative assessment, not an observed portfolio result.")
         
         assess_c5, assess_c6, assess_c7, assess_c8 = st.columns(4)
         assess_c5.metric("Evidence available", "Comparable evidence")
-        assess_c6.metric("Comparable market", "Belize")
+        assess_c6.metric("Comparable market", "Lumeria (fictional)")
         assess_c7.metric("Income pattern", "Recurring salary")
-        assess_c8.metric("Credit access", "Underserved")
+        assess_c8.metric("Credit access", "Underserved", help="Illustrative qualitative market-context assessment.")
     
     st.divider()
     
@@ -248,13 +306,13 @@ if run_assessment or st.session_state.step1_completed:
         with obs_col:
             st.markdown("**OBSERVED**")
             st.caption("What we know directly")
-            st.write("- Comparable consumer installment lending exists in Belize")
-            st.write("- Target population has verifiable recurring employment income")
+            st.write("- Comparable consumer installment lending exists in Lumeria (fictional)")
+            st.write("- Initial eligibility is defined around consumers with verifiable recurring employment income")
         
         with inf_col:
             st.markdown("**INFERRED**")
             st.caption("What we can reasonably infer")
-            st.write("- Existing Caribbean portfolio evidence may inform the initial Panama expectation")
+            st.write("- Comparable-market evidence may inform the initial Panama expectation")
             st.write("- Shorter loan terms can accelerate repayment learning")
         
         with ass_col:
@@ -272,18 +330,18 @@ if run_assessment or st.session_state.step1_completed:
         transfer_col1, transfer_col2 = st.columns([2, 2])
         
         with transfer_col1:
-            st.write("**Belize may provide informative comparable-market evidence, but confidence should be reduced when transferring repayment expectations to Panama.**")
+            st.write("**Lumeria (fictional) provides illustrative comparable-market context, but transferability to Panama remains uncertain.**")
         
         with transfer_col2:
             t1, t2 = st.columns(2)
-            t1.metric("Evidence source", "Belize")
-            t2.metric("Transferability", "Partial")
+            t1.metric("Evidence source", "Lumeria (fictional)")
+            t2.metric("Transferability", "Partial", help="Illustrative qualitative transfer assessment; no numerical adjustment is applied in this MVP.")
         
         t3, t4 = st.columns(2)
-        t3.metric("Transfer discount", "Required")
+        t3.metric("Transfer caution", "Required", help="Illustrative qualitative caution; no numerical transfer discount is applied in this MVP.")
         t3_text = "**Main reason:** Borrower selection, market structure and collections effectiveness may differ materially across countries."
         
-        t4.metric("Confidence", "Medium")
+        t4.metric("Confidence", "Medium", help="Illustrative qualitative assessment; no formal confidence score is calculated in this MVP.")
         t4_text = "**Key uncertainty:** Local repayment behavior"
         
         st.write(t3_text)
@@ -296,7 +354,7 @@ if run_assessment or st.session_state.step1_completed:
         st.subheader("Key Uncertainties to Resolve")
         
         uncertainties = [
-            "1. How does repayment behavior in Panama compare with Belize?",
+            "1. How might repayment behavior in Panama differ from Lumeria (fictional)?",
             "2. How sensitive is repayment to loan amount?",
             "3. Does performance vary materially by income band?",
             "4. How transferable are existing underwriting signals?",
@@ -321,7 +379,7 @@ if run_assessment or st.session_state.step1_completed:
         st.session_state.step1_market = "Panama"
         st.session_state.step1_population = "Lower-to-middle income salaried consumers"
         st.session_state.step1_evidence_basis = "Comparable markets"
-        st.session_state.step1_comparable_markets = ["Belize"]
+        st.session_state.step1_comparable_markets = ["Lumeria (fictional)"]
         st.session_state.step1_confidence = "Medium"
         st.session_state.step2_completed = True
         st.rerun()
@@ -470,12 +528,23 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         context_c1.metric("Market", "Panama")
         context_c2.metric("Population", "Salaried, credit-underserved")
         context_c3.metric("Evidence basis", "Comparable markets")
-        context_c4.metric("Comparable", "Belize")
+        context_c4.metric("Comparable", "Lumeria (fictional)")
         context_c5.metric("Confidence", "Medium")
     
     st.divider()
 
     # ========== EXECUTIVE OPPORTUNITY CURVE ==========
+    policy_constraints = {
+        "max_credit_loss_budget": max_learning_loss,
+        "max_portfolio_exposure": max_portfolio_exposure,
+        "max_pilot_capacity": max_pilot_capacity,
+        "max_loan_amount": max_loan_amount,
+        "min_repayment_term": min_repayment_term,
+        "max_repayment_term": max_repayment_term,
+        "max_default_rate": max_default_rate / 100,
+        "min_pricing": min_pricing / 100,
+        "max_pricing": max_pricing / 100,
+    }
     with st.container(border=True):
         st.subheader("Credit Policy Opportunity Curve")
         st.caption("Expected economics across loan amounts under current risk assumptions.")
@@ -489,56 +558,21 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         curve_amounts = np.linspace(curve_minimum, curve_maximum, 100)
         curve_rows = []
         for amount in curve_amounts:
-            pd_at_amount = expected_pd_by_loan_amount(
-                amount,
-                PRIOR_EXPECTED_PD,
-                MID_TICKET_PD,
-                HIGH_TICKET_PD,
-            )
-            expected_ue_at_amount = expected_unit_economics_per_loan(
-                amount,
-                RECOMMENDED_FEE_RATE,
-                pd_at_amount,
-                LGD,
-                FUNDING_COST,
-                OPERATING_COST,
-                COLLECTION_COST_PER_DEFAULT,
-            )
-            cohort_exposure = INITIAL_COHORT * amount
-            cohort_credit_loss = INITIAL_COHORT * amount * pd_at_amount * LGD
-            violated_constraints = []
-            if amount > max_loan_amount:
-                violated_constraints.append("Maximum loan amount")
-            if cohort_exposure > max_portfolio_exposure:
-                violated_constraints.append("Maximum portfolio exposure")
-            if cohort_credit_loss > max_learning_loss:
-                violated_constraints.append("Credit-loss budget")
-            if INITIAL_COHORT > max_pilot_capacity:
-                violated_constraints.append("Pilot capacity")
-            if pd_at_amount > max_default_rate / 100:
-                violated_constraints.append("Maximum acceptable default rate")
-            if not min_pricing <= RECOMMENDED_FEE_RATE * 100 <= max_pricing:
-                violated_constraints.append("Pricing range")
-            if not min_repayment_term <= RECOMMENDED_TERM <= max_repayment_term:
-                violated_constraints.append("Repayment term")
+            evaluation = evaluate_policy(amount, RECOMMENDED_TERM, INITIAL_COHORT, PRIOR_EXPECTED_PD, MID_TICKET_PD, HIGH_TICKET_PD, RECOMMENDED_FEE_RATE, FUNDING_RATE, OPERATING_COST, COLLECTION_COST_PER_DEFAULT, LGD, policy_constraints)
             curve_rows.append({
                 "Loan Amount": amount,
-                "Expected PD": pd_at_amount,
-                "Expected Unit Economics": expected_ue_at_amount,
-                "Feasible": not violated_constraints,
-                "Constraint violated": ", ".join(violated_constraints) or "None",
+                "Expected PD": evaluation["expected_pd"],
+                "Expected Unit Economics": evaluation["expected_unit_economics"],
+                "Feasible": evaluation["feasible"],
+                "Constraint violated": evaluation["constraint_violated"],
             })
 
         curve_df = pd.DataFrame(curve_rows)
         constrained_curve = curve_df[curve_df["Feasible"]]
         unconstrained_optimum = curve_df.loc[curve_df["Expected Unit Economics"].idxmax()]
         constrained_optimum = constrained_curve.loc[constrained_curve["Expected Unit Economics"].idxmax()]
-        recommended_pd = expected_pd_by_loan_amount(
-            RECOMMENDED_LOAN,
-            PRIOR_EXPECTED_PD,
-            MID_TICKET_PD,
-            HIGH_TICKET_PD,
-        )
+        recommended_evaluation = evaluate_policy(RECOMMENDED_LOAN, RECOMMENDED_TERM, INITIAL_COHORT, PRIOR_EXPECTED_PD, MID_TICKET_PD, HIGH_TICKET_PD, RECOMMENDED_FEE_RATE, FUNDING_RATE, OPERATING_COST, COLLECTION_COST_PER_DEFAULT, LGD, policy_constraints)
+        recommended_pd = recommended_evaluation["expected_pd"]
 
         is_interior_optimum = constrained_optimum["Loan Amount"] not in {curve_minimum, curve_maximum}
         summary_c1, summary_c2, summary_c3, summary_c4 = st.columns(4)
@@ -555,7 +589,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         )
         zero_rule = alt.Chart(pd.DataFrame({"value": [0]})).mark_rule(color="#8b938d", strokeDash=[4, 4]).encode(y="value:Q")
         markers = pd.DataFrame([
-            {"Loan Amount": RECOMMENDED_LOAN, "Expected Unit Economics": expected_unit_economics_per_loan(RECOMMENDED_LOAN, RECOMMENDED_FEE_RATE, recommended_pd, LGD, FUNDING_COST, OPERATING_COST, COLLECTION_COST_PER_DEFAULT), "Label": "Recommended start"},
+            {"Loan Amount": RECOMMENDED_LOAN, "Expected Unit Economics": recommended_evaluation["expected_unit_economics"], "Label": "Recommended start"},
             {"Loan Amount": constrained_optimum["Loan Amount"], "Expected Unit Economics": constrained_optimum["Expected Unit Economics"], "Label": "Estimated optimum" if is_interior_optimum else "Highest value evaluated"},
         ])
         marker_chart = alt.Chart(markers).mark_point(filled=True, size=100, color="#c54c2e").encode(x="Loan Amount:Q", y="Expected Unit Economics:Q", tooltip=["Label:N", alt.Tooltip("Loan Amount:Q", format="$,.2f"), alt.Tooltip("Expected Unit Economics:Q", format="$,.2f")])
@@ -574,7 +608,8 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.write("**ECONOMICS**")
             audit_inputs([
                 {"Parameter": "Fee", "Value": pct(RECOMMENDED_FEE_RATE), "Source": "Synthetic assumption"},
-                {"Parameter": "Funding cost", "Value": money(FUNDING_COST), "Source": "Synthetic assumption"},
+                {"Parameter": "Funding charge rate", "Value": pct(FUNDING_RATE), "Source": "Synthetic economic assumption"},
+                {"Parameter": "Funding cost at $200", "Value": money(RECOMMENDED_LOAN * FUNDING_RATE), "Source": "Calculated value"},
                 {"Parameter": "Operating cost", "Value": money(OPERATING_COST), "Source": "Synthetic assumption"},
                 {"Parameter": "Collection cost per default", "Value": money(COLLECTION_COST_PER_DEFAULT), "Source": "Synthetic assumption"},
                 {"Parameter": "LGD", "Value": pct(LGD), "Source": "Synthetic assumption"},
@@ -594,42 +629,28 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
                 {"Parameter": "Minimum / maximum repayment term", "Value": f"{min_repayment_term} / {max_repayment_term}", "Source": "Business constraint"},
             ])
             st.write("**Audit table**")
-            st.code("PD(A) = linear interpolation between the visible anchors: ($200, PD_200), ($500, PD_500), and ($1,000, PD_1000).\nRevenue(A) = A x Fee\nECL(A) = A x PD(A) x LGD\nExpected Collection Cost(A) = PD(A) x Collection Cost per Default\nUE(A) = Revenue(A) - ECL(A) - Funding Cost - Operating Cost - Expected Collection Cost(A)")
+            st.code(f"For $200 <= A <= $500:\nPD(A) = {PRIOR_EXPECTED_PD:.2f} + ({MID_TICKET_PD:.2f} - {PRIOR_EXPECTED_PD:.2f}) x (A - 200) / 300\nFor $500 < A <= $1,000:\nPD(A) = {MID_TICKET_PD:.2f} + ({HIGH_TICKET_PD:.2f} - {MID_TICKET_PD:.2f}) x (A - 500) / 500\nFunding Cost(A) = A x {FUNDING_RATE:.3f}\nRevenue(A) = A x Fee\nECL(A) = A x PD(A) x LGD\nExpected Collection Cost(A) = PD(A) x Collection Cost per Default\nUE(A) = Revenue(A) - ECL(A) - Funding Cost(A) - Operating Cost - Expected Collection Cost(A)\nContinuous optimum method: dense deterministic grid search over 100 points from $200 to the active maximum loan amount. Discrete candidates are evaluated separately below.")
             audit_rows = []
             for amount in [200, 350, 500, 800, 1000]:
-                pd_at_amount = expected_pd_by_loan_amount(amount, PRIOR_EXPECTED_PD, MID_TICKET_PD, HIGH_TICKET_PD)
-                expected_ue_at_amount = expected_unit_economics_per_loan(amount, RECOMMENDED_FEE_RATE, pd_at_amount, LGD, FUNDING_COST, OPERATING_COST, COLLECTION_COST_PER_DEFAULT)
-                cohort_exposure = INITIAL_COHORT * amount
-                cohort_credit_loss = INITIAL_COHORT * amount * pd_at_amount * LGD
-                violated_constraints = []
-                if amount > max_loan_amount:
-                    violated_constraints.append("Maximum loan amount")
-                if cohort_exposure > max_portfolio_exposure:
-                    violated_constraints.append("Maximum portfolio exposure")
-                if cohort_credit_loss > max_learning_loss:
-                    violated_constraints.append("Credit-loss budget")
-                if pd_at_amount > max_default_rate / 100:
-                    violated_constraints.append("Maximum acceptable default rate")
-                if not min_pricing <= RECOMMENDED_FEE_RATE * 100 <= max_pricing:
-                    violated_constraints.append("Pricing range")
+                evaluation = evaluate_policy(amount, RECOMMENDED_TERM, INITIAL_COHORT, PRIOR_EXPECTED_PD, MID_TICKET_PD, HIGH_TICKET_PD, RECOMMENDED_FEE_RATE, FUNDING_RATE, OPERATING_COST, COLLECTION_COST_PER_DEFAULT, LGD, policy_constraints)
                 audit_rows.append({
                     "Loan Amount": money(amount),
-                    "Expected PD": pct(pd_at_amount),
+                    "Expected PD": pct(evaluation["expected_pd"]),
                     "Fee": pct(RECOMMENDED_FEE_RATE),
                     "Revenue": money(amount * RECOMMENDED_FEE_RATE),
-                    "Expected Credit Loss": money(amount * pd_at_amount * LGD),
-                    "Funding Cost": money(FUNDING_COST),
+                    "Expected Credit Loss": money(evaluation["expected_credit_loss"]),
+                    "Funding Cost": money(evaluation["funding_cost"]),
                     "Operating Cost": money(OPERATING_COST),
-                    "Expected Collection Cost": money(pd_at_amount * COLLECTION_COST_PER_DEFAULT),
-                    "Expected Unit Economics": money(expected_ue_at_amount),
-                    "Break-even PD": pct(break_even_default_rate(amount, RECOMMENDED_FEE_RATE, LGD, FUNDING_COST, OPERATING_COST, COLLECTION_COST_PER_DEFAULT)),
+                    "Expected Collection Cost": money(evaluation["expected_collection_cost"]),
+                    "Expected Unit Economics": money(evaluation["expected_unit_economics"]),
+                    "Break-even PD": pct(evaluation["break_even_pd"]),
                     "Repayment Term": f"{RECOMMENDED_TERM} installment(s)",
                     "Initial Cohort Size": INITIAL_COHORT,
-                    "Initial Cohort Exposure": money(cohort_exposure),
-                    "Expected Cohort Credit Loss": money(cohort_credit_loss),
-                    "Feasible?": "Yes" if not violated_constraints else "No",
-                    "Constraint violated": ", ".join(violated_constraints) or "None",
-                    "Decision classification": "Recommended start" if amount == RECOMMENDED_LOAN else ("Feasible candidate" if not violated_constraints else "Infeasible candidate"),
+                    "Initial Cohort Exposure": money(evaluation["cohort_exposure"]),
+                    "Expected Cohort Credit Loss": money(evaluation["cohort_expected_credit_loss"]),
+                    "Feasible?": "Yes" if evaluation["feasible"] else "No",
+                    "Constraint violated": evaluation["constraint_violated"],
+                    "Decision classification": "Recommended start" if amount == RECOMMENDED_LOAN else ("Feasible candidate" if evaluation["feasible"] else "Infeasible candidate"),
                 })
             audit_curve = pd.DataFrame(audit_rows)
             st.table(audit_curve)
@@ -666,14 +687,17 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
                 standard_deviation = np.sqrt(variance)
                 initial_exposure = cohort_size * RECOMMENDED_LOAN
                 exposure_utilization = initial_exposure / max_portfolio_exposure
-                qualifies = standard_deviation <= 0.06 and exposure_utilization <= 0.10
+                uncertainty_pass = standard_deviation <= MAX_PLANNING_POSTERIOR_SD
+                exposure_share_pass = exposure_utilization <= MAX_INITIAL_EXPOSURE_SHARE
+                qualifies = uncertainty_pass and exposure_share_pass
                 cohort_rows.append({
                     "Cohort size": cohort_size,
                     "Cohort": f"{cohort_size} customers",
-                    "Uncertainty (percentage points)": round(standard_deviation * 100, 2),
+                    "Planning posterior SD (percentage points)": round(standard_deviation * 100, 2),
                     "Initial principal exposure": money(initial_exposure),
                     "Exposure utilization": pct(exposure_utilization),
                     "Result": "Eligible" if qualifies else "Not eligible",
+                    "Eligibility reason": f"Uncertainty {'passes' if uncertainty_pass else 'fails'} <= 6 pp; exposure share {'passes' if exposure_share_pass else 'fails'} <= 10%",
                 })
 
             st.write("**Decision logic**")
@@ -683,19 +707,19 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.write("**Candidates evaluated**")
             st.caption("10, 25, 50 and 100 customers.")
             st.write("**Comparison chart**")
-            st.caption("Evidence gained by initial cohort size")
+            st.caption("Planning posterior SD by initial cohort size")
             cohort_chart = alt.Chart(pd.DataFrame(cohort_rows)).mark_line(color="#20745d", strokeWidth=2).encode(
                 x=alt.X("Cohort size:Q", title="Initial cohort size (customers)", scale=alt.Scale(domain=[0, 100])),
-                y=alt.Y("Uncertainty (percentage points):Q", title="Posterior standard deviation (pp)", scale=alt.Scale(zero=False)),
-                tooltip=["Cohort size:Q", "Uncertainty (percentage points):Q", "Initial principal exposure:N", "Exposure utilization:N", "Result:N"],
-            ) + alt.Chart(pd.DataFrame(cohort_rows)).mark_point(filled=True, size=70, color="#20745d").encode(x="Cohort size:Q", y="Uncertainty (percentage points):Q")
+                y=alt.Y("Planning posterior SD (percentage points):Q", title="Planning posterior SD (pp)", scale=alt.Scale(zero=False)),
+                tooltip=["Cohort size:Q", "Planning posterior SD (percentage points):Q", "Initial principal exposure:N", "Exposure utilization:N", "Result:N", "Eligibility reason:N"],
+            ) + alt.Chart(pd.DataFrame(cohort_rows)).mark_point(filled=True, size=70, color="#20745d").encode(x="Cohort size:Q", y="Planning posterior SD (percentage points):Q")
             st.altair_chart(cohort_chart, use_container_width=True)
             st.table(pd.DataFrame(cohort_rows))
             st.caption("Larger cohorts reduce uncertainty, but require more capital to be committed before the first policy review.")
             st.write("**Calculation**")
-            st.code(f"expected defaults = n x {PRIOR_EXPECTED_PD:.2f}\nexpected non-defaults = n x {1 - PRIOR_EXPECTED_PD:.2f}\nalpha_updated = {PRIOR_ALPHA:.0f} + expected defaults\nbeta_updated = {PRIOR_BETA:.0f} + expected non-defaults\nposterior standard deviation = sqrt((alpha_updated x beta_updated) / ((alpha_updated + beta_updated)^2 x (alpha_updated + beta_updated + 1)))\ninitial exposure = n x {money(RECOMMENDED_LOAN)}\nexposure utilization = initial exposure / {money(max_portfolio_exposure)}")
+            st.code(f"Planning approximation: observed default share = current prior expectation\nexpected defaults = n x {PRIOR_EXPECTED_PD:.2f}\nexpected non-defaults = n x {1 - PRIOR_EXPECTED_PD:.2f}\nalpha_planning = {PRIOR_ALPHA:.0f} + expected defaults\nbeta_planning = {PRIOR_BETA:.0f} + expected non-defaults\nplanning posterior SD = sqrt((alpha_planning x beta_planning) / ((alpha_planning + beta_planning)^2 x (alpha_planning + beta_planning + 1)))\ninitial exposure = n x {money(RECOMMENDED_LOAN)}\nexposure utilization = initial exposure / {money(max_portfolio_exposure)}")
             st.write("**Selection rule**")
-            st.caption("Choose the smallest candidate satisfying uncertainty <= 6 pp and initial exposure <= 10% of the portfolio exposure limit. These are illustrative MVP decision rules, not universal statistical requirements.")
+            st.caption("Choose the smallest candidate satisfying planning posterior SD <= 6 pp and initial exposure <= 10% of the portfolio exposure limit. These are illustrative learning-stage model decision rules, not universal statistical requirements.")
             st.write("**Assumptions**")
             st.caption("Comparable-market evidence is partially transferable, matured outcomes are informative, and each candidate is reviewed before further origination.")
             st.write("**What would change the result?**")
@@ -704,7 +728,9 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.code(f"For n = 10:\nuncertainty = 5.39 pp <= 6 pp\ninitial exposure = 10 x {money(RECOMMENDED_LOAN)} = {money(10 * RECOMMENDED_LOAN)}\nexposure utilization = {money(10 * RECOMMENDED_LOAN)} / {money(max_portfolio_exposure)} = {10 * RECOMMENDED_LOAN / max_portfolio_exposure:.1%}\nRESULT = Eligible")
             audit_inputs([
                 {"Parameter": "Prior expected PD", "Value": "10%", "Source": "Synthetic comparable-market assumption"},
-                {"Parameter": "Prior strength", "Value": "20", "Source": "Model assumption"},
+                {"Parameter": "Prior strength", "Value": "20", "Source": "Model decision rule"},
+                {"Parameter": "Maximum planning posterior uncertainty", "Value": "6 pp", "Source": "Model decision rule"},
+                {"Parameter": "Maximum initial exposure share", "Value": "10%", "Source": "Model decision rule"},
                 {"Parameter": "Loan amount", "Value": "$200", "Source": "Decision candidate"},
                 {"Parameter": "Cohort candidates", "Value": "10, 25, 50, 100", "Source": "Model assumption"},
             ])
@@ -726,28 +752,14 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         recommended_loan = RECOMMENDED_LOAN
         recommended_term = RECOMMENDED_TERM
         recommended_fee_rate = RECOMMENDED_FEE_RATE
-        expected_pd = PRIOR_EXPECTED_PD
+        expected_pd = float(recommended_evaluation["expected_pd"])
         lgd = LGD
-        funding_cost = FUNDING_COST
+        funding_rate = FUNDING_RATE
         operating_cost = OPERATING_COST
         collection_cost = COLLECTION_COST_PER_DEFAULT
-        expected_ue = expected_unit_economics_per_loan(
-            loan_amount=recommended_loan,
-            pricing_rate=recommended_fee_rate,
-            expected_pd=expected_pd,
-            lgd=lgd,
-            funding_cost=funding_cost,
-            operating_cost=operating_cost,
-            collection_cost=collection_cost,
-        )
-        break_even_pd = break_even_default_rate(
-            recommended_loan,
-            recommended_fee_rate,
-            lgd,
-            funding_cost,
-            operating_cost,
-            collection_cost,
-        )
+        funding_cost = float(recommended_evaluation["funding_cost"])
+        expected_ue = float(recommended_evaluation["expected_unit_economics"])
+        break_even_pd = float(recommended_evaluation["break_even_pd"])
 
         economic_headroom = break_even_pd - expected_pd
         economics_col, break_even_col, headroom_col = st.columns(3)
@@ -771,9 +783,9 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             )
 
         with st.expander("How are unit economics calculated?"):
-            expected_revenue = recommended_loan * recommended_fee_rate
-            expected_credit_loss = expected_pd * lgd * recommended_loan
-            expected_collection_cost = expected_pd * collection_cost
+            expected_revenue = float(recommended_evaluation["revenue"])
+            expected_credit_loss = float(recommended_evaluation["expected_credit_loss"])
+            expected_collection_cost = float(recommended_evaluation["expected_collection_cost"])
             st.write("**Expected revenue**")
             st.code(f"${recommended_loan:,.0f} x {recommended_fee_rate:.2f} = {money(expected_revenue)}")
             st.write("**Expected credit loss**")
@@ -790,13 +802,13 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.caption("Default risk alone does not determine whether a credit product is viable. Two products with different loan amounts, pricing and repayment structures can have similar default risk but very different economics.")
             st.caption("During an early learning phase, the engine may accept slightly negative Unit Economics if the expected learning value justifies the controlled economic cost and the result remains within the learning-loss budget.")
             st.write("**Break-even default rate**")
-            st.code(f"0 = {money(expected_revenue)} - PD_break_even x ({lgd:.2f} x ${recommended_loan:,.0f} + ${collection_cost:,.0f}) - {money(funding_cost)} - {money(operating_cost)}\nPD_break_even = (${expected_revenue:,.2f} - ${funding_cost:,.2f} - ${operating_cost:,.2f}) / (${recommended_loan:,.0f} x {lgd:.2f} + ${collection_cost:,.0f}) = {pct(break_even_pd)}")
+            st.code(f"Funding Cost = ${recommended_loan:,.0f} x {funding_rate:.3f} = {money(funding_cost)}\n0 = {money(expected_revenue)} - PD_break_even x ({lgd:.2f} x ${recommended_loan:,.0f} + ${collection_cost:,.0f}) - {money(funding_cost)} - {money(operating_cost)}\nPD_break_even = (${expected_revenue:,.2f} - (${recommended_loan:,.0f} x {funding_rate:.3f}) - ${operating_cost:,.2f}) / (${recommended_loan:,.0f} x {lgd:.2f} + ${collection_cost:,.0f}) = {pct(break_even_pd)}")
             audit_inputs([
                 {"Parameter": "Loan amount", "Value": "$200", "Source": "Decision candidate"},
                 {"Parameter": "Fee rate", "Value": "20%", "Source": "Model assumption"},
                 {"Parameter": "Expected PD", "Value": "10%", "Source": "Synthetic comparable-market assumption"},
                 {"Parameter": "LGD", "Value": "70%", "Source": "Model assumption"},
-                {"Parameter": "Funding / operating cost", "Value": "$15.00 / $10.00", "Source": "Model assumption"},
+                {"Parameter": "Funding charge rate / operating cost", "Value": f"{pct(funding_rate)} / {money(operating_cost)}", "Source": "Synthetic economic assumption"},
                 {"Parameter": "Collection cost per default", "Value": "$5.00", "Source": "Model assumption"},
             ])
 
@@ -806,17 +818,19 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             term_candidates = [term for term in [1, 2, 4, 6] if min_repayment_term <= term <= max_repayment_term]
             for amount in [200, 350, 500, 800, 1000]:
                 revenue = amount * recommended_fee_rate
-                pd_at_amount = expected_pd_by_loan_amount(amount, expected_pd, MID_TICKET_PD, HIGH_TICKET_PD)
-                credit_loss = pd_at_amount * lgd * amount
-                expected_collections = pd_at_amount * collection_cost
-                ue = expected_unit_economics_per_loan(amount, recommended_fee_rate, pd_at_amount, lgd, funding_cost, operating_cost, collection_cost)
+                evaluation = evaluate_policy(amount, recommended_term, INITIAL_COHORT, PRIOR_EXPECTED_PD, MID_TICKET_PD, HIGH_TICKET_PD, recommended_fee_rate, funding_rate, operating_cost, collection_cost, lgd, policy_constraints)
+                pd_at_amount = float(evaluation["expected_pd"])
+                credit_loss = float(evaluation["expected_credit_loss"])
+                expected_collections = float(evaluation["expected_collection_cost"])
+                ue = float(evaluation["expected_unit_economics"])
+                funding_at_amount = float(evaluation["funding_cost"])
                 learning_loss_capacity = int(max_learning_loss // credit_loss)
                 exposure_capacity = int(max_portfolio_exposure // amount)
                 amount_rows.append({"Loan amount": amount, "Expected UE / loan": round(ue, 2)})
                 for term in term_candidates:
                     product_rows.append({
                         "Loan": f"${amount:,.0f}", "Term": f"{term} installment(s)", "Revenue": money(revenue),
-                        "Expected credit loss": money(credit_loss), "Funding": money(funding_cost),
+                        "Expected credit loss": money(credit_loss), "Funding": money(funding_at_amount),
                         "Operating": money(operating_cost), "Expected collections": money(expected_collections),
                         "Expected UE": money(ue), "Principal exposure": money(amount),
                         "Expected PD": pct(pd_at_amount),
@@ -935,30 +949,28 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
     # ========== DECISION 4: HOW MUCH RISK ==========
     with st.container(border=True):
         st.subheader("Decision 4 - How Much Risk Are We Taking?")
-        expected_credit_loss_per_loan = PRIOR_EXPECTED_PD * LGD * RECOMMENDED_LOAN
-        expected_learning_loss = INITIAL_COHORT * expected_credit_loss_per_loan
-        expected_exposure = INITIAL_COHORT * RECOMMENDED_LOAN
+        expected_learning_loss = float(recommended_evaluation["cohort_expected_credit_loss"])
+        expected_exposure = float(recommended_evaluation["cohort_exposure"])
         remaining_learning_budget = max_learning_loss - expected_learning_loss
         
         risk_c1, risk_c2, risk_c3, risk_c4 = st.columns(4)
-        risk_c1.metric("Expected exposure", money(expected_exposure))
+        risk_c1.metric("Planned initial exposure", money(expected_exposure))
         risk_c2.metric(
             "Expected Credit Loss - Initial Cohort",
             money(expected_learning_loss),
             help="For this MVP, the learning-loss budget is compared against expected credit loss generated during the initial cohort.",
         )
-        risk_c3.metric("Maximum possible exposure", money(expected_exposure))
-        risk_c4.metric("Remaining learning budget", money(remaining_learning_budget))
+        risk_c3.metric("Portfolio exposure limit", money(max_portfolio_exposure))
+        risk_c4.metric("Remaining credit-loss budget", money(remaining_learning_budget))
         
         with st.expander("How is risk controlled?"):
             utilization_rows = pd.DataFrame({
-                "Constraint": ["Credit-loss budget", "Portfolio exposure", "Pilot capacity", "Loan amount ceiling", "Repayment term ceiling"],
+                "Constraint": ["Credit-loss budget", "Portfolio exposure", "Pilot capacity", "Loan amount ceiling"],
                 "Utilization (%)": [
                     expected_learning_loss / max_learning_loss * 100,
                     expected_exposure / max_portfolio_exposure * 100,
                     INITIAL_COHORT / max_pilot_capacity * 100,
                     RECOMMENDED_LOAN / max_loan_amount * 100,
-                    RECOMMENDED_TERM / max_repayment_term * 100,
                 ],
             }).set_index("Constraint")
             st.write("**Decision logic**")
@@ -969,7 +981,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.caption("The selected initial cohort, loan amount and term against each hard constraint.")
             st.write("**Comparison chart**")
             st.caption("Hard constraint utilization; all values start at zero and represent the share of each limit used.")
-            constraint_order = ["Credit-loss budget", "Portfolio exposure", "Pilot capacity", "Loan amount ceiling", "Repayment term ceiling"]
+            constraint_order = ["Credit-loss budget", "Portfolio exposure", "Pilot capacity", "Loan amount ceiling"]
             utilization_chart = alt.Chart(utilization_rows.reset_index()).mark_bar(color="#20745d").encode(
                 x=alt.X("Constraint:N", title=None, sort=constraint_order),
                 y=alt.Y("Utilization (%):Q", title="Constraint utilization (%)", scale=alt.Scale(domain=[0, 100])),
@@ -977,7 +989,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             )
             st.altair_chart(utilization_chart, use_container_width=True)
             st.write("**Calculation**")
-            st.code(f"Expected Credit Loss - Initial Cohort = cohort size x loan amount x PD x LGD\n= {INITIAL_COHORT} x $200 x {expected_pd:.2f} x {lgd:.2f}\n= {money(expected_learning_loss)}\n\nCredit-loss budget utilization = {money(expected_learning_loss)} / {money(max_learning_loss)} = {expected_learning_loss / max_learning_loss:.1%}\nExposure utilization = {money(expected_exposure)} / {money(max_portfolio_exposure)} = {expected_exposure / max_portfolio_exposure:.1%}\nCapacity utilization = {INITIAL_COHORT} / {max_pilot_capacity} = {INITIAL_COHORT / max_pilot_capacity:.1%}\nLoan ceiling utilization = $200 / {money(max_loan_amount)} = {RECOMMENDED_LOAN / max_loan_amount:.1%}\nTerm utilization = 1 / {max_repayment_term} = {RECOMMENDED_TERM / max_repayment_term:.1%}")
+            st.code(f"Expected Credit Loss - Initial Cohort = cohort size x loan amount x PD($200) x LGD\n= {INITIAL_COHORT} x $200 x {recommended_evaluation['expected_pd']:.2f} x {LGD:.2f}\n= {money(expected_learning_loss)}\n\nCredit-loss budget utilization = {money(expected_learning_loss)} / {money(max_learning_loss)} = {expected_learning_loss / max_learning_loss:.1%}\nExposure utilization = {money(expected_exposure)} / {money(max_portfolio_exposure)} = {expected_exposure / max_portfolio_exposure:.1%}\nCapacity utilization = {INITIAL_COHORT} / {max_pilot_capacity} = {INITIAL_COHORT / max_pilot_capacity:.1%}\nLoan ceiling utilization = $200 / {money(max_loan_amount)} = {RECOMMENDED_LOAN / max_loan_amount:.1%}\nMinimum term check: {RECOMMENDED_TERM} >= {min_repayment_term} -> {'PASS' if RECOMMENDED_TERM >= min_repayment_term else 'FAIL'}\nMaximum term check: {RECOMMENDED_TERM} <= {max_repayment_term} -> {'PASS' if RECOMMENDED_TERM <= max_repayment_term else 'FAIL'}")
             st.write("**Selection rule**")
             st.caption("The policy is feasible when each utilization is at or below 100%; no constraint is binding in this illustrative recommendation.")
             st.write("**Assumptions**")
@@ -987,7 +999,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.write("**Reproduce this decision**")
             st.code(f"Credit-loss budget utilization = {money(expected_learning_loss)} / {money(max_learning_loss)} = {expected_learning_loss / max_learning_loss:.1%}\nCapacity utilization = {INITIAL_COHORT} / {max_pilot_capacity} = {INITIAL_COHORT / max_pilot_capacity:.1%}\nLoan ceiling utilization = $200 / {money(max_loan_amount)} = {RECOMMENDED_LOAN / max_loan_amount:.1%}")
             audit_inputs([
-                {"Parameter": "Expected PD / LGD", "Value": "10% / 70%", "Source": "Comparable portfolio assumption / Model assumption"},
+                {"Parameter": "Expected PD / LGD", "Value": f"{pct(PRIOR_EXPECTED_PD)} / {pct(LGD)}", "Source": "Synthetic comparable-market assumption / Synthetic economic assumption"},
                 {"Parameter": "Initial cohort / loan", "Value": "10 / $200", "Source": "Decision candidate"},
                 {"Parameter": "Learning-loss budget", "Value": money(max_learning_loss), "Source": "Business constraint"},
                 {"Parameter": "Exposure / capacity limits", "Value": f"{money(max_portfolio_exposure)} / {max_pilot_capacity}", "Source": "Business constraint"},
@@ -999,7 +1011,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
     with st.container(border=True):
         st.subheader("Policy Feasibility Check")
         st.write("**Feasible policy**")
-        st.caption("All five hard constraints are within limits.")
+        st.caption("All active hard constraints are satisfied.")
     
     st.divider()
     
@@ -1009,7 +1021,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         econ_c1, econ_c2, econ_c3, econ_c4 = st.columns(4)
         
         with econ_c1:
-            funding_cost = st.number_input("Funding cost / loan", min_value=0.0, value=FUNDING_COST, step=1.0, key="model_funding_cost", help="Estimated cost of funding the loan.")
+            funding_rate = st.number_input("Funding charge rate (% of principal)", min_value=0.0, max_value=1.0, value=FUNDING_RATE, step=0.005, format="%.3f", key="model_funding_rate", help="Synthetic simplified funding-charge assumption. Funding Cost(A) = Loan Amount x funding charge rate; 7.5% produces $15.00 at $200.")
         with econ_c2:
             operating_cost = st.number_input("Operating cost / loan", min_value=0.0, value=OPERATING_COST, step=1.0, key="model_operating_cost", help="Estimated operational cost associated with originating and servicing one loan.")
         with econ_c3:
@@ -1042,9 +1054,10 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             with engine_c3:
                 min_actionable_probability = st.number_input("Min actionable probability", min_value=0.1, max_value=1.0, value=0.7, step=0.05, help="Minimum confidence required before the engine converts uncertain evidence into a policy change.")
                 monte_carlo_trials = st.number_input("Simulation trials", min_value=200, max_value=10000, value=4000, step=200, help="Number of simulated scenarios used to estimate uncertainty in the decision. Higher values improve numerical stability but require more computation.")
+            st.caption("Maximum planning posterior uncertainty: 6 pp. Maximum initial exposure share before first review: 10%. Both are illustrative MVP model decision rules used in Decision 1.")
 
     with st.expander("Decision Trace"):
-        st.code(f"Market context -> Public Belize market evidence\nStarting PD -> {pct(PRIOR_EXPECTED_PD)} synthetic assumption\nBusiness limits -> {money(max_learning_loss)} credit-loss budget; {money(max_portfolio_exposure)} exposure limit; {max_pilot_capacity} customer capacity; {money(max_loan_amount)} ticket ceiling; {min_repayment_term}-{max_repayment_term} installment range\nCohort candidates -> 10, 25, 50, 100\nSelected cohort -> {INITIAL_COHORT}\nLoan candidates -> $200, $350, $500, $800, $1,000\nSelected starting loan -> {money(RECOMMENDED_LOAN)}\nTerm candidates -> {min_repayment_term}, 2, 4, {max_repayment_term}\nSelected term -> {RECOMMENDED_TERM} installment\nExpected initial credit loss -> {money(expected_learning_loss)}\nExpected UE / loan -> {money(expected_ue)}\nPolicy result -> Feasible")
+        st.code(f"Market context -> Lumeria (fictional) comparable-market context\nStarting PD -> {pct(PRIOR_EXPECTED_PD)} synthetic assumption\nBusiness limits -> {money(max_learning_loss)} credit-loss budget; {money(max_portfolio_exposure)} exposure limit; {max_pilot_capacity} customer capacity; {money(max_loan_amount)} ticket ceiling; {min_repayment_term}-{max_repayment_term} installment range\nCohort candidates -> 10, 25, 50, 100\nSelected cohort -> {INITIAL_COHORT}\nLoan candidates -> $200, $350, $500, $800, $1,000\nSelected starting loan -> {money(RECOMMENDED_LOAN)}\nTerm candidates -> {min_repayment_term}, 2, 4, {max_repayment_term}\nSelected term -> {RECOMMENDED_TERM} installment\nExpected initial credit loss -> {money(expected_learning_loss)}\nExpected UE / loan -> {money(expected_ue)}\nPolicy result -> Feasible")
     
     st.divider()
     
@@ -1072,6 +1085,8 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         illustrative_repayments = 9
         updated_alpha = PRIOR_ALPHA + illustrative_defaults
         updated_beta = PRIOR_BETA + illustrative_repayments
+        prior_sd = np.sqrt((PRIOR_ALPHA * PRIOR_BETA) / ((PRIOR_ALPHA + PRIOR_BETA) ** 2 * (PRIOR_ALPHA + PRIOR_BETA + 1)))
+        updated_sd = np.sqrt((updated_alpha * updated_beta) / ((updated_alpha + updated_beta) ** 2 * (updated_alpha + updated_beta + 1)))
         risk_grid = np.linspace(0.001, 0.35, 120)
         prior_density = np.exp((PRIOR_ALPHA - 1) * np.log(risk_grid) + (PRIOR_BETA - 1) * np.log(1 - risk_grid))
         updated_density = np.exp((updated_alpha - 1) * np.log(risk_grid) + (updated_beta - 1) * np.log(1 - risk_grid))
@@ -1097,7 +1112,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         with update_c3:
             st.write("**UPDATED EXPECTATION**")
             st.caption(f"{pct((PRIOR_ALPHA + 1) / (PRIOR_ALPHA + PRIOR_BETA + 10))} expected default")
-            st.caption("Higher confidence")
+            st.caption(f"Posterior SD: {updated_sd * 100:.2f} pp")
         with update_a3:
             st.write("->")
         with update_c4:
@@ -1126,7 +1141,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             st.write("**Comparison chart**")
             st.caption("Initial and updated risk distributions are shown above. They update from the visible risk-evidence inputs; the synthetic outcome scenario remains fixed in this MVP.")
             st.write("**Calculation**")
-            st.code(f"Initial Beta prior: alpha = {PRIOR_ALPHA:.0f}, beta = {PRIOR_BETA:.0f}\nIllustrative observed outcomes: 1 default, 9 repayments\nalpha_updated = {PRIOR_ALPHA:.0f} + 1 = {updated_alpha:.0f}\nbeta_updated = {PRIOR_BETA:.0f} + 9 = {updated_beta:.0f}\nUpdated expected PD = {updated_alpha:.0f} / ({updated_alpha:.0f} + {updated_beta:.0f}) = {pct(updated_alpha / (updated_alpha + updated_beta))}")
+            st.code(f"Initial Beta prior: alpha = {PRIOR_ALPHA:.0f}, beta = {PRIOR_BETA:.0f}\nIllustrative observed outcomes: 1 default, 9 repayments\nalpha_updated = {PRIOR_ALPHA:.0f} + 1 = {updated_alpha:.0f}\nbeta_updated = {PRIOR_BETA:.0f} + 9 = {updated_beta:.0f}\nExpected PD: {pct(PRIOR_EXPECTED_PD)} -> {pct(updated_alpha / (updated_alpha + updated_beta))}\nPosterior SD: {prior_sd * 100:.2f} pp -> {updated_sd * 100:.2f} pp")
             st.write("**Selection rule**")
             st.caption("The point estimate remains economically feasible when updated expected PD is at or below break-even PD. Expansion also requires sufficiently reduced uncertainty, a fully matured prior cohort, and all Step 2 hard constraints to remain satisfied. Otherwise, hold or reduce exposure.")
             st.write("**Assumptions**")
@@ -1137,13 +1152,15 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             next_ticket_ladder = [200, 350, 500, 800, 1000]
             next_ticket = next_ticket_ladder[next_ticket_ladder.index(int(RECOMMENDED_LOAN)) + 1]
             next_cohort = INITIAL_COHORT
-            next_exposure = next_cohort * next_ticket
-            st.code(f"Beta-Binomial Bayesian updating\nInitial expected PD = {PRIOR_ALPHA:.0f} / ({PRIOR_ALPHA:.0f} + {PRIOR_BETA:.0f}) = {pct(PRIOR_EXPECTED_PD)}\nUpdated expected PD = ({PRIOR_ALPHA:.0f} + 1) / ({PRIOR_ALPHA:.0f} + 1 + {PRIOR_BETA:.0f} + 9) = {updated_alpha:.0f} / {updated_alpha + updated_beta:.0f} = {pct(updated_alpha / (updated_alpha + updated_beta))}\nPrevious exposure = {INITIAL_COHORT} x {money(RECOMMENDED_LOAN)} = {money(expected_exposure)}\nAdaptive ticket ladder = $200 -> $350 -> $500 -> $800 -> $1,000\nPoint estimate is economically feasible: updated PD {pct(updated_alpha / (updated_alpha + updated_beta))} <= break-even PD {pct(break_even_pd)}\nExpansion remains conditional on reduced uncertainty, a fully matured cohort, and all hard constraints being satisfied.\nIllustrative next exposure if expansion criteria are satisfied = {next_cohort} x ${next_ticket} = {money(next_exposure)}\nThe point estimate remains unchanged because the synthetic observed default rate matches the synthetic starting assumption. The distribution becomes narrower because the scenario adds local evidence.")
+            next_evaluation = evaluate_policy(next_ticket, RECOMMENDED_TERM, next_cohort, float(updated_alpha / (updated_alpha + updated_beta)), MID_TICKET_PD, HIGH_TICKET_PD, RECOMMENDED_FEE_RATE, FUNDING_RATE, OPERATING_COST, COLLECTION_COST_PER_DEFAULT, LGD, policy_constraints)
+            next_exposure = float(next_evaluation["cohort_exposure"])
+            st.code(f"Beta-Binomial Bayesian updating\nInitial expected PD = {PRIOR_ALPHA:.0f} / ({PRIOR_ALPHA:.0f} + {PRIOR_BETA:.0f}) = {pct(PRIOR_EXPECTED_PD)}\nUpdated reference PD at $200 = {updated_alpha:.0f} / {updated_alpha + updated_beta:.0f} = {pct(updated_alpha / (updated_alpha + updated_beta))}\nAdaptive ticket ladder = $200 -> $350 -> $500 -> $800 -> $1,000\nNext candidate PD($350) = {pct(next_evaluation['expected_pd'])}\nNext candidate UE($350) = {money(next_evaluation['expected_unit_economics'])}; break-even PD($350) = {pct(next_evaluation['break_even_pd'])}\nNext candidate is {'feasible' if next_evaluation['feasible'] else 'not feasible'}: {next_evaluation['constraint_violated']}\nPolicy rule: advance at most one predefined ticket step per evidence review when the prior cohort has fully matured, the next candidate has non-negative UE under PD($350), and all active hard constraints are satisfied.\nIllustrative next planned exposure = {next_cohort} x ${next_ticket} = {money(next_exposure)}")
             audit_inputs([
-                {"Parameter": "Prior alpha / beta", "Value": "2 / 18", "Source": "Model assumption"},
+                {"Parameter": "Prior alpha / beta", "Value": f"{PRIOR_ALPHA:.0f} / {PRIOR_BETA:.0f}", "Source": "Model decision rule"},
                 {"Parameter": "Prior expected PD", "Value": "10%", "Source": "Synthetic comparable-market assumption"},
                 {"Parameter": "Illustrative observed repayments / defaults", "Value": "9 / 1", "Source": "Synthetic scenario"},
-                {"Parameter": "Updated alpha / beta", "Value": "3 / 27", "Source": "Calculated value"},
+                {"Parameter": "Updated alpha / beta", "Value": f"{updated_alpha:.0f} / {updated_beta:.0f}", "Source": "Calculated value"},
+                {"Parameter": "Next candidate PD / UE", "Value": f"{pct(next_evaluation['expected_pd'])} / {money(next_evaluation['expected_unit_economics'])}", "Source": "Calculated value"},
                 {"Parameter": "Adaptive ticket ladder", "Value": "$200, $350, $500, $800, $1,000", "Source": "Model assumption"},
             ])
         

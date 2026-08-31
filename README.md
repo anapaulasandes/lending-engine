@@ -2,7 +2,7 @@
 
 A decision-support prototype for staged credit-market expansion. The application turns comparable-market evidence, business constraints, unit economics, and observed repayment outcomes into an auditable initial lending policy.
 
-The current demonstration models an unsecured installment-loan launch in Panama using **Belize** as the single comparable market.
+The current demonstration models an unsecured installment-loan launch in Panama using **Lumeria (fictional)** as the single synthetic comparable market.
 
 > **Illustrative case study.** All portfolio assumptions, risk parameters, business constraints, and numerical results are synthetic and do not represent proprietary company data. Public market information is used only for contextual illustration.
 
