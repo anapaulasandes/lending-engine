@@ -479,15 +479,6 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
         st.subheader("Credit Policy Opportunity Curve")
         st.caption("Expected economics across loan amounts under current risk assumptions.")
 
-        allowed_terms = list(range(min_repayment_term, max_repayment_term + 1))
-        evaluation_term = st.selectbox(
-            "Evaluate economics at repayment term",
-            options=allowed_terms,
-            format_func=lambda term: f"{term} installment{'s' if term != 1 else ''}",
-            help="The current MVP does not model economics or risk as varying by term. This control records the allowed term being evaluated; the curve uses the same current economics for each permitted term.",
-        )
-        st.caption("Term is constrained and recorded here. The current MVP does not yet vary economics or risk by repayment term.")
-
         risk_beliefs_valid = 0 < PRIOR_EXPECTED_PD < 1 and 0 < MID_TICKET_PD < 1 and 0 < HIGH_TICKET_PD < 1 and PRIOR_EXPECTED_PD <= MID_TICKET_PD <= HIGH_TICKET_PD
         if not risk_beliefs_valid:
             st.warning("The current risk-belief inputs imply that default risk decreases as loan amount increases. Adjust the assumptions to use PD values between 0 and 1 in non-decreasing order.")
@@ -527,7 +518,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
                 violated_constraints.append("Maximum acceptable default rate")
             if not min_pricing <= RECOMMENDED_FEE_RATE * 100 <= max_pricing:
                 violated_constraints.append("Pricing range")
-            if not min_repayment_term <= evaluation_term <= max_repayment_term:
+            if not min_repayment_term <= RECOMMENDED_TERM <= max_repayment_term:
                 violated_constraints.append("Repayment term")
             curve_rows.append({
                 "Loan Amount": amount,
@@ -631,7 +622,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
                     "Expected Collection Cost": money(pd_at_amount * COLLECTION_COST_PER_DEFAULT),
                     "Expected Unit Economics": money(expected_ue_at_amount),
                     "Break-even PD": pct(break_even_default_rate(amount, RECOMMENDED_FEE_RATE, LGD, FUNDING_COST, OPERATING_COST, COLLECTION_COST_PER_DEFAULT)),
-                    "Repayment Term": f"{evaluation_term} installment(s)",
+                    "Repayment Term": f"{RECOMMENDED_TERM} installment(s)",
                     "Initial Cohort Size": INITIAL_COHORT,
                     "Initial Cohort Exposure": money(cohort_exposure),
                     "Expected Cohort Credit Loss": money(cohort_credit_loss),
@@ -648,6 +639,7 @@ if st.session_state.step1_completed and st.session_state.step2_completed and st.
             risk_points = alt.Chart(risk_anchors).mark_point(filled=True, size=90, color="#c54c2e").encode(x="Loan Amount:Q", y="Expected PD:Q", tooltip=[alt.Tooltip("Loan Amount:Q", format="$,.0f"), alt.Tooltip("Expected PD:Q", format=".1%")])
             st.altair_chart((risk_line + risk_points).properties(height=220), use_container_width=True)
             st.caption("The risk-belief curve represents the current belief before sufficient local performance evidence exists. As repayment outcomes mature, these beliefs can be updated and the opportunity curve recalculated.")
+            st.caption("For this MVP, repayment term affects eligibility and evidence maturity only. It does not independently change expected PD or Unit Economics, so it is not an opportunity-curve control.")
     
     # ========== DECISION 1: WHO AND HOW MANY ==========
     with st.container(border=True):
