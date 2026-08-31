@@ -4,6 +4,8 @@ A decision-support prototype for staged credit-market expansion. The application
 
 The current demonstration models an unsecured installment-loan launch in Panama using **Belize** as the single comparable market.
 
+> **Illustrative case study.** All portfolio assumptions, risk parameters, business constraints, and numerical results are synthetic and do not represent proprietary company data. Public market information is used only for contextual illustration.
+
 ## What It Does
 
 The Streamlit dashboard follows a four-step decision flow:

@@ -152,6 +152,7 @@ MARKET_SEGMENTS = {
 
 st.title("CREDIT EXPANSION DECISIONING")
 st.caption("Structured evidence and quantitative decisions for credit market entry.")
+st.caption("Illustrative case study. All portfolio assumptions, risk parameters, business constraints and numerical results are synthetic and do not represent proprietary company data. Public market information is used only for contextual illustration.")
 
 # Initialize session state
 if "step1_completed" not in st.session_state:
